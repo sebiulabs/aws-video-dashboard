@@ -1365,11 +1365,20 @@ def page_settings():
         <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="us-east-2"> US East (Ohio)</label>
         <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="us-west-1"> US West (California)</label>
         <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="us-west-2"> US West (Oregon)</label>
+        <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="ca-central-1"> Canada (Central)</label>
         <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="eu-west-1"> EU (Ireland)</label>
         <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="eu-west-2"> EU (London)</label>
+        <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="eu-west-3"> EU (Paris)</label>
         <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="eu-central-1"> EU (Frankfurt)</label>
+        <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="eu-north-1"> EU (Stockholm)</label>
+        <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="ap-south-1"> AP (Mumbai)</label>
         <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="ap-southeast-1"> AP (Singapore)</label>
+        <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="ap-southeast-2"> AP (Sydney)</label>
         <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="ap-northeast-1"> AP (Tokyo)</label>
+        <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="ap-northeast-2"> AP (Seoul)</label>
+        <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="sa-east-1"> SA (São Paulo)</label>
+        <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="me-south-1"> ME (Bahrain)</label>
+        <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="af-south-1"> Africa (Cape Town)</label>
     </div></div>
     <div class="field"><label>Access Key</label><input type="text" id="aws-key" placeholder="AKIA..."><div class="hint">Blank = use instance role / ~/.aws/credentials</div></div>
     <div class="field"><label>Secret Key</label><input type="password" id="aws-secret"></div>
