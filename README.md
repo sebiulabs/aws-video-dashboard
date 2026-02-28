@@ -1,8 +1,12 @@
 # AWS Video Dashboard
 
-Real-time monitoring for AWS infrastructure — built for video engineers and broadcast professionals managing live events in the cloud.
+A lightweight, self-hosted monitoring dashboard that gives video engineers and broadcast professionals a single pane of glass for their entire AWS infrastructure during live events.
 
-One dashboard for EC2 instances, Media Services (MediaLive, MediaConnect, MediaPackage, CloudFront, IVS), deployments, ECS, custom endpoints, alert rules, and an AI assistant. Configure everything from the web UI — no YAML, no config files to edit.
+Instead of jumping between the AWS Console, CloudWatch, and third-party tools, this dashboard pulls everything into one view: EC2 instances (state, CPU, uptime), AWS Media Services (MediaLive encoding channels, MediaConnect transport flows, MediaPackage origin endpoints, CloudFront CDN distributions, IVS interactive streams), CodeDeploy deployments, and ECS services — across up to 18 AWS regions at once.
+
+On top of that, you can add custom endpoint monitors (HTTP, TCP, Ping, JSON API) for anything AWS doesn't cover — SRT ingest ports, HLS manifests, WHIP endpoints, encoding API health checks. Set threshold-based alert rules that trigger notifications over Email, Slack, WhatsApp, or Telegram. View 24-hour trend graphs to spot patterns. Ask an AI assistant questions about your infrastructure in plain English.
+
+Everything is configured from the web UI. No YAML files, no Terraform, no config files to hand-edit. Enter your AWS credentials, tick the regions and services you care about, and it starts monitoring immediately.
 
 [![CI](https://github.com/sebiulabs/aws-video-dashboard/actions/workflows/ci.yml/badge.svg)](https://github.com/sebiulabs/aws-video-dashboard/actions/workflows/ci.yml)
 
