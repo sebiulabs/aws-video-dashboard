@@ -1,0 +1,361 @@
+"""
+Alert Rules Engine
+===================
+Flexible alert rule system configurable from the UI.
+Rules are stored in config.json under "alert_rules".
+
+Each rule:
+  {
+    "id": "rule_uuid",
+    "name": "High CPU on encoder",
+    "enabled": true,
+    "service": "ec2",              # ec2, medialive, mediaconnect, cloudfront, ivs, ecs, mediapackage
+    "resource_filter": "",         # optional: instance ID, channel ARN, or "*" for all
+    "metric": "cpu_utilization",   # metric name
+    "operator": ">",              # >, <, >=, <=, ==, !=
+    "threshold": 80,
+    "severity": "warning",         # info, warning, critical
+    "channels": ["email","telegram","whatsapp"],  # which notification channels
+    "cooldown_minutes": 15,        # don't re-alert within this window
+    "last_triggered": null,
+    "trigger_count": 0
+  }
+"""
+
+import uuid
+import json
+import logging
+from datetime import datetime, timezone, timedelta
+from typing import Optional
+from config_manager import load_config, save_config
+
+logger = logging.getLogger(__name__)
+
+# ─── Operators ───────────────────────────────────────────────────────────────
+
+OPERATORS = {
+    ">": lambda a, b: a > b,
+    "<": lambda a, b: a < b,
+    ">=": lambda a, b: a >= b,
+    "<=": lambda a, b: a <= b,
+    "==": lambda a, b: a == b,
+    "!=": lambda a, b: a != b,
+    "contains": lambda a, b: str(b).lower() in str(a).lower(),
+    "not_contains": lambda a, b: str(b).lower() not in str(a).lower(),
+}
+
+# ─── Available metrics per service ───────────────────────────────────────────
+
+SERVICE_METRICS = {
+    "ec2": [
+        {"id": "cpu_utilization", "name": "CPU Utilization (%)", "type": "number"},
+        {"id": "state", "name": "Instance State", "type": "string"},
+        {"id": "status_checks", "name": "Status Checks", "type": "string"},
+    ],
+    "medialive": [
+        {"id": "state", "name": "Channel State", "type": "string"},
+        {"id": "pipelines_running", "name": "Pipelines Running", "type": "number"},
+        {"id": "input_loss", "name": "Input Loss (any pipeline)", "type": "string"},
+        {"id": "active_alerts", "name": "Active Alerts Count", "type": "number"},
+    ],
+    "mediaconnect": [
+        {"id": "status", "name": "Flow Status", "type": "string"},
+        {"id": "source_health", "name": "Source Health", "type": "string"},
+    ],
+    "mediapackage": [
+        {"id": "status", "name": "Channel Status", "type": "string"},
+        {"id": "endpoint_count", "name": "Endpoint Count", "type": "number"},
+    ],
+    "cloudfront": [
+        {"id": "status", "name": "Distribution Status", "type": "string"},
+        {"id": "enabled", "name": "Distribution Enabled", "type": "string"},
+        {"id": "error_rate_4xx", "name": "4xx Error Rate (%)", "type": "number"},
+        {"id": "error_rate_5xx", "name": "5xx Error Rate (%)", "type": "number"},
+    ],
+    "ivs": [
+        {"id": "state", "name": "Channel State", "type": "string"},
+        {"id": "stream_health", "name": "Stream Health", "type": "string"},
+        {"id": "viewer_count", "name": "Viewer Count", "type": "number"},
+    ],
+    "ecs": [
+        {"id": "running_vs_desired", "name": "Running < Desired", "type": "number"},
+        {"id": "status", "name": "Service Status", "type": "string"},
+    ],
+    "easy_monitor": [
+        {"id": "status", "name": "Endpoint Status (up/down/degraded)", "type": "string"},
+        {"id": "response_time_ms", "name": "Response Time (ms)", "type": "number"},
+        {"id": "status_code", "name": "HTTP Status Code", "type": "number"},
+        {"id": "packet_loss", "name": "Packet Loss (%)", "type": "number"},
+    ],
+}
+
+# ─── Pre-built rule templates ────────────────────────────────────────────────
+
+RULE_TEMPLATES = [
+    {
+        "name": "High CPU on any EC2",
+        "service": "ec2", "resource_filter": "*",
+        "metric": "cpu_utilization", "operator": ">", "threshold": 80,
+        "severity": "warning", "cooldown_minutes": 15,
+    },
+    {
+        "name": "EC2 status check failed",
+        "service": "ec2", "resource_filter": "*",
+        "metric": "status_checks", "operator": "==", "threshold": "impaired",
+        "severity": "critical", "cooldown_minutes": 5,
+    },
+    {
+        "name": "MediaLive channel stopped",
+        "service": "medialive", "resource_filter": "*",
+        "metric": "state", "operator": "!=", "threshold": "RUNNING",
+        "severity": "critical", "cooldown_minutes": 5,
+    },
+    {
+        "name": "MediaLive input loss",
+        "service": "medialive", "resource_filter": "*",
+        "metric": "input_loss", "operator": "==", "threshold": "true",
+        "severity": "critical", "cooldown_minutes": 2,
+    },
+    {
+        "name": "MediaConnect flow stopped",
+        "service": "mediaconnect", "resource_filter": "*",
+        "metric": "status", "operator": "!=", "threshold": "ACTIVE",
+        "severity": "critical", "cooldown_minutes": 5,
+    },
+    {
+        "name": "CloudFront high 5xx errors",
+        "service": "cloudfront", "resource_filter": "*",
+        "metric": "error_rate_5xx", "operator": ">", "threshold": 5,
+        "severity": "warning", "cooldown_minutes": 15,
+    },
+    {
+        "name": "CloudFront high 4xx errors",
+        "service": "cloudfront", "resource_filter": "*",
+        "metric": "error_rate_4xx", "operator": ">", "threshold": 10,
+        "severity": "warning", "cooldown_minutes": 15,
+    },
+    {
+        "name": "IVS stream unhealthy",
+        "service": "ivs", "resource_filter": "*",
+        "metric": "stream_health", "operator": "==", "threshold": "UNHEALTHY",
+        "severity": "critical", "cooldown_minutes": 5,
+    },
+    {
+        "name": "IVS low viewer count",
+        "service": "ivs", "resource_filter": "*",
+        "metric": "viewer_count", "operator": "<", "threshold": 1,
+        "severity": "info", "cooldown_minutes": 30,
+    },
+    {
+        "name": "ECS tasks not running",
+        "service": "ecs", "resource_filter": "*",
+        "metric": "running_vs_desired", "operator": "<", "threshold": 0,
+        "severity": "critical", "cooldown_minutes": 5,
+    },
+    {
+        "name": "Endpoint down",
+        "service": "easy_monitor", "resource_filter": "*",
+        "metric": "status", "operator": "==", "threshold": "down",
+        "severity": "critical", "cooldown_minutes": 2,
+    },
+    {
+        "name": "Endpoint slow (>2s)",
+        "service": "easy_monitor", "resource_filter": "*",
+        "metric": "response_time_ms", "operator": ">", "threshold": 2000,
+        "severity": "warning", "cooldown_minutes": 10,
+    },
+]
+
+
+# ─── Rule CRUD ───────────────────────────────────────────────────────────────
+
+def get_rules() -> list:
+    config = load_config()
+    return config.get("alert_rules", [])
+
+
+def save_rules(rules: list):
+    config = load_config()
+    config["alert_rules"] = rules
+    save_config(config)
+
+
+def add_rule(rule_data: dict) -> dict:
+    rules = get_rules()
+    rule = {
+        "id": str(uuid.uuid4())[:8],
+        "name": rule_data.get("name", "Untitled Rule"),
+        "enabled": rule_data.get("enabled", True),
+        "service": rule_data.get("service", "ec2"),
+        "resource_filter": rule_data.get("resource_filter", "*"),
+        "metric": rule_data.get("metric", ""),
+        "operator": rule_data.get("operator", ">"),
+        "threshold": rule_data.get("threshold", 0),
+        "severity": rule_data.get("severity", "warning"),
+        "channels": rule_data.get("channels", ["email", "telegram", "whatsapp"]),
+        "cooldown_minutes": rule_data.get("cooldown_minutes", 15),
+        "last_triggered": None,
+        "trigger_count": 0,
+    }
+    rules.append(rule)
+    save_rules(rules)
+    return rule
+
+
+def update_rule(rule_id: str, updates: dict) -> Optional[dict]:
+    rules = get_rules()
+    for i, r in enumerate(rules):
+        if r["id"] == rule_id:
+            rules[i].update(updates)
+            rules[i]["id"] = rule_id  # prevent ID overwrite
+            save_rules(rules)
+            return rules[i]
+    return None
+
+
+def delete_rule(rule_id: str) -> bool:
+    rules = get_rules()
+    new_rules = [r for r in rules if r["id"] != rule_id]
+    if len(new_rules) < len(rules):
+        save_rules(new_rules)
+        return True
+    return False
+
+
+def add_template(template_index: int) -> Optional[dict]:
+    if 0 <= template_index < len(RULE_TEMPLATES):
+        tpl = RULE_TEMPLATES[template_index].copy()
+        tpl["channels"] = ["email", "telegram", "whatsapp"]
+        return add_rule(tpl)
+    return None
+
+
+# ─── Rule Evaluation ─────────────────────────────────────────────────────────
+
+def _extract_metric_value(resource: dict, metric: str, service: str):
+    """Extract a metric value from a resource data dict."""
+    # Direct key match
+    if metric in resource:
+        return resource[metric]
+
+    # Computed metrics
+    if service == "ecs" and metric == "running_vs_desired":
+        running = resource.get("running", 0)
+        desired = resource.get("desired", 1)
+        return running - desired
+
+    if service == "medialive" and metric == "input_loss":
+        # Check pipeline details for input loss
+        pipelines = resource.get("pipeline_details", [])
+        for p in pipelines:
+            if p.get("active_input_switch_action") or "LOSS" in str(p.get("alerts", [])).upper():
+                return "true"
+        return "false"
+
+    if service == "medialive" and metric == "active_alerts":
+        return len(resource.get("alerts_detail", []))
+
+    return None
+
+
+def evaluate_rules(infra_data: dict) -> list:
+    """
+    Evaluate all enabled rules against current infrastructure data.
+    Returns list of triggered alerts:
+      [{"rule": rule_dict, "resource": resource_id, "value": actual_value, "message": str}]
+    """
+    rules = get_rules()
+    triggered = []
+    now = datetime.now(timezone.utc)
+
+    # Map service names to infra data keys
+    service_data_map = {
+        "ec2": infra_data.get("ec2", {}).get("instances", []),
+        "medialive": infra_data.get("medialive", {}).get("channels", []),
+        "mediaconnect": infra_data.get("mediaconnect", {}).get("flows", []),
+        "mediapackage": infra_data.get("mediapackage", {}).get("channels", []),
+        "cloudfront": infra_data.get("cloudfront", {}).get("distributions", []),
+        "ivs": infra_data.get("ivs", {}).get("channels", []),
+        "ecs": infra_data.get("ecs_services", []),
+        "easy_monitor": infra_data.get("easy_monitor", {}).get("endpoints", []),
+    }
+
+    for rule in rules:
+        if not rule.get("enabled", True):
+            continue
+
+        # Check cooldown
+        last = rule.get("last_triggered")
+        if last:
+            try:
+                last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+                cooldown = timedelta(minutes=rule.get("cooldown_minutes", 15))
+                if now - last_dt < cooldown:
+                    continue
+            except (ValueError, TypeError):
+                pass
+
+        service = rule.get("service", "")
+        resources = service_data_map.get(service, [])
+        metric = rule.get("metric", "")
+        operator = rule.get("operator", ">")
+        threshold = rule.get("threshold")
+        resource_filter = rule.get("resource_filter", "*")
+        op_func = OPERATORS.get(operator)
+
+        if not op_func:
+            continue
+
+        for res in resources:
+            # Resource filter
+            res_id = (
+                res.get("instance_id") or res.get("channel_id") or
+                res.get("flow_arn") or res.get("distribution_id") or
+                res.get("name") or res.get("service") or "unknown"
+            )
+            if resource_filter and resource_filter != "*":
+                if resource_filter not in str(res_id) and resource_filter not in str(res.get("name", "")):
+                    continue
+
+            value = _extract_metric_value(res, metric, service)
+            if value is None:
+                continue
+
+            # Coerce types for comparison
+            try:
+                if isinstance(threshold, (int, float)) and not isinstance(value, str):
+                    value = float(value)
+                    threshold_cmp = float(threshold)
+                else:
+                    value = str(value)
+                    threshold_cmp = str(threshold)
+            except (ValueError, TypeError):
+                continue
+
+            if op_func(value, threshold_cmp):
+                res_name = res.get("name", res_id)
+                severity_emoji = {"critical": "🔴", "warning": "🟡", "info": "🔵"}.get(rule.get("severity"), "⚪")
+                msg = (
+                    f"{severity_emoji} [{rule.get('severity', 'warning').upper()}] {rule.get('name', 'Alert')}\n"
+                    f"Resource: {res_name} ({res_id})\n"
+                    f"Metric: {metric} = {value} (threshold: {operator} {threshold})"
+                )
+                triggered.append({
+                    "rule": rule,
+                    "resource_id": res_id,
+                    "resource_name": res_name,
+                    "value": value,
+                    "message": msg,
+                })
+
+    # Update trigger timestamps
+    if triggered:
+        all_rules = get_rules()
+        triggered_ids = {t["rule"]["id"] for t in triggered}
+        for r in all_rules:
+            if r["id"] in triggered_ids:
+                r["last_triggered"] = now.isoformat()
+                r["trigger_count"] = r.get("trigger_count", 0) + 1
+        save_rules(all_rules)
+
+    return triggered
