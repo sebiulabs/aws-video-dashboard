@@ -1,0 +1,215 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Syntax check — all Python files compile
+        run: python -m py_compile app.py monitor.py video_monitor.py config_manager.py easy_monitor.py alert_rules.py openrouter_ai.py email_notifier.py telegram_notifier.py slack_notifier.py history_db.py
+
+      - name: Import check — all modules importable
+        run: |
+          python -c "import config_manager; print('config_manager OK')"
+          python -c "import alert_rules; print('alert_rules OK')"
+          python -c "import easy_monitor; print('easy_monitor OK')"
+          python -c "import history_db; print('history_db OK')"
+          python -c "import email_notifier; print('email_notifier OK')"
+          python -c "import telegram_notifier; print('telegram_notifier OK')"
+          python -c "import slack_notifier; print('slack_notifier OK')"
+          python -c "import openrouter_ai; print('openrouter_ai OK')"
+          python -c "import video_monitor; print('video_monitor OK')"
+          python -c "import monitor; print('monitor OK')"
+
+      - name: Config manager tests
+        run: |
+          python -c "
+          import json, os, tempfile
+          os.environ['CONFIG_PATH'] = os.path.join(tempfile.mkdtemp(), 'test_config.json')
+          from config_manager import load_config, save_config, update_config, get_masked_config
+
+          # Test defaults load
+          cfg = load_config()
+          assert cfg['aws']['region'] == 'eu-west-2', 'Default region wrong'
+          assert cfg['monitoring']['check_interval_minutes'] == 5, 'Default interval wrong'
+          print('defaults OK')
+
+          # Test save + load round-trip
+          cfg['aws']['access_key_id'] = 'AKIAIOSFODNN7EXAMPLE'
+          cfg['aws']['secret_access_key'] = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'
+          save_config(cfg)
+          cfg2 = load_config()
+          assert cfg2['aws']['access_key_id'] == 'AKIAIOSFODNN7EXAMPLE', 'Save/load failed'
+          print('save/load OK')
+
+          # Test file permissions
+          import stat
+          perms = oct(os.stat(os.environ['CONFIG_PATH']).st_mode)[-3:]
+          assert perms == '600', f'Config permissions should be 600, got {perms}'
+          print('permissions OK')
+
+          # Test masking — should show only last 4 chars
+          masked = get_masked_config()
+          assert masked['aws']['secret_access_key'].endswith('EKEY'), 'Masking last 4 failed'
+          assert masked['aws']['secret_access_key'].startswith('••'), 'Masking prefix failed'
+          assert 'wJal' not in masked['aws']['secret_access_key'], 'First chars should not be visible'
+          print('masking OK')
+
+          # Test update
+          update_config({'monitoring': {'cpu_threshold': 90.0}})
+          cfg3 = load_config()
+          assert cfg3['monitoring']['cpu_threshold'] == 90.0, 'Update failed'
+          print('update OK')
+
+          # Test regions list preserved
+          import config_manager
+          config_manager.CONFIG_PATH = os.path.join(tempfile.mkdtemp(), 'test_config2.json')
+          with open(config_manager.CONFIG_PATH, 'w') as f:
+              json.dump({'aws': {'region': 'us-east-1', 'regions': ['us-east-1', 'eu-west-1']}}, f)
+          cfg4 = load_config()
+          assert 'us-east-1' in cfg4['aws']['regions'], 'Regions list not preserved'
+          assert 'eu-west-1' in cfg4['aws']['regions'], 'Regions list not preserved'
+          assert cfg4['aws']['region'] == 'us-east-1', 'Primary region should be first in list'
+          print('regions OK')
+
+          print('All config_manager tests passed')
+          "
+
+      - name: SSRF blocklist tests
+        run: |
+          python -c "
+          from easy_monitor import _is_blocked_host
+
+          # Should block private IPs
+          assert _is_blocked_host('127.0.0.1'), 'localhost not blocked'
+          assert _is_blocked_host('10.0.0.1'), 'RFC1918 10.x not blocked'
+          assert _is_blocked_host('172.16.0.1'), 'RFC1918 172.16.x not blocked'
+          assert _is_blocked_host('192.168.1.1'), 'RFC1918 192.168.x not blocked'
+          assert _is_blocked_host('169.254.169.254'), 'IMDS not blocked'
+
+          # Should block empty/invalid
+          assert _is_blocked_host(''), 'Empty host not blocked'
+          assert _is_blocked_host('not-a-real-host-zzz.invalid'), 'Unresolvable not blocked'
+
+          # Should allow public IPs
+          assert not _is_blocked_host('google.com'), 'google.com should be allowed'
+          assert not _is_blocked_host('8.8.8.8'), '8.8.8.8 should be allowed'
+
+          print('All SSRF tests passed')
+          "
+
+      - name: Alert rules tests
+        run: |
+          python -c "
+          import os, tempfile
+          os.environ['CONFIG_PATH'] = os.path.join(tempfile.mkdtemp(), 'test_config.json')
+          from alert_rules import get_rules, add_rule, delete_rule, RULE_TEMPLATES, SERVICE_METRICS
+
+          assert len(RULE_TEMPLATES) > 0, 'No templates'
+          assert len(SERVICE_METRICS) > 0, 'No metrics'
+          print(f'Templates: {len(RULE_TEMPLATES)}, Metrics: {len(SERVICE_METRICS)}')
+
+          r = add_rule({'name': 'Test Rule', 'service': 'ec2', 'metric': 'cpu_avg', 'operator': '>', 'threshold': 80, 'severity': 'warning'})
+          assert r['name'] == 'Test Rule'
+          assert len(get_rules()) == 1
+          delete_rule(r['id'])
+          assert len(get_rules()) == 0
+
+          print('All alert_rules tests passed')
+          "
+
+      - name: History DB tests
+        run: |
+          python -c "
+          import os, tempfile
+          # Use temp DB
+          import history_db
+          history_db.DB_PATH = os.path.join(tempfile.mkdtemp(), 'test_history.db')
+
+          from history_db import save_snapshot, get_history
+
+          # Empty at start
+          assert len(get_history()) == 0
+
+          # Save a snapshot
+          save_snapshot({'ec2': {'total': 2, 'running': 2, 'healthy': 2, 'instances': [{'cpu_utilization': 50}]}})
+          h = get_history()
+          assert len(h) == 1
+          assert h[0]['ec2_total'] == 2
+
+          # Save more and check ordering
+          for i in range(5):
+              save_snapshot({'ec2': {'total': i, 'running': i, 'healthy': i, 'instances': []}})
+          assert len(get_history()) == 6
+          assert len(get_history(limit=3)) == 3
+
+          print('All history_db tests passed')
+          "
+
+      - name: Flask app smoke test
+        run: |
+          python -c "
+          import os, tempfile
+          os.environ['CONFIG_PATH'] = os.path.join(tempfile.mkdtemp(), 'test_config.json')
+          from app import app
+
+          client = app.test_client()
+
+          # Pages load
+          assert client.get('/').status_code == 200, 'Dashboard failed'
+          assert client.get('/monitors').status_code == 200, 'Monitors failed'
+          assert client.get('/alerts').status_code == 200, 'Alerts failed'
+          assert client.get('/ai').status_code == 200, 'AI page failed'
+          assert client.get('/settings').status_code == 200, 'Settings failed'
+          print('All pages load OK')
+
+          # API status
+          r = client.get('/api/status')
+          assert r.status_code == 200, 'Status API failed'
+          print('API status OK')
+
+          # Config API
+          r = client.get('/api/config')
+          assert r.status_code == 200, 'Config API failed'
+          data = r.get_json()
+          assert 'aws' in data, 'Config missing aws key'
+          print('Config API OK')
+
+          # CSRF check — POST without JSON content-type should fail
+          r = client.post('/api/refresh', data='{}')
+          assert r.status_code == 400, f'CSRF should block non-JSON POST, got {r.status_code}'
+          print('CSRF protection OK')
+
+          # History API
+          r = client.get('/api/history?limit=10')
+          assert r.status_code == 200, 'History API failed'
+          print('History API OK')
+
+          # Negative limit clamped
+          r = client.get('/api/history?limit=-5')
+          assert r.status_code == 200, 'Negative limit should not crash'
+          print('Negative limit OK')
+
+          print('All smoke tests passed')
+          "
