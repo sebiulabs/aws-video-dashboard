@@ -35,14 +35,44 @@ from easy_monitor import (
 )
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(24).hex())
+
+# Stable secret key — persist to file so sessions survive restarts
+_SECRET_KEY_PATH = os.path.join(os.path.dirname(__file__), ".flask_secret")
+def _get_secret_key():
+    env_key = os.environ.get("FLASK_SECRET_KEY")
+    if env_key:
+        return env_key
+    if os.path.exists(_SECRET_KEY_PATH):
+        with open(_SECRET_KEY_PATH, "r") as f:
+            return f.read().strip()
+    key = os.urandom(32).hex()
+    with open(_SECRET_KEY_PATH, "w") as f:
+        f.write(key)
+    os.chmod(_SECRET_KEY_PATH, 0o600)
+    return key
+
+app.secret_key = _get_secret_key()
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 last_check = {"data": None, "timestamp": None}
 ai_conversations = {}  # session-less conversation store (keyed by simple ID)
 
+# Login rate limiting — per-IP attempt tracking
+import time as _time
+_login_attempts = {}  # ip -> [timestamp, ...]
+_LOGIN_MAX = 5        # max attempts
+_LOGIN_WINDOW = 300   # 5-minute window
+
 
 @app.before_request
 def require_login():
+    # CSRF check — state-changing requests must have JSON content type
+    if request.method == "POST" and request.path.startswith("/api/"):
+        ct = request.content_type or ""
+        if "application/json" not in ct:
+            return jsonify({"error": "invalid content type"}), 400
+
     auth = load_config().get("auth", {})
     if not auth.get("password_hash"):
         return None
@@ -91,12 +121,22 @@ async function doLogin(){
 
 @app.route("/api/login", methods=["POST"])
 def api_login():
+    ip = request.remote_addr or "unknown"
+    now = _time.time()
+    # Rate limiting
+    attempts = _login_attempts.get(ip, [])
+    attempts = [t for t in attempts if now - t < _LOGIN_WINDOW]
+    if len(attempts) >= _LOGIN_MAX:
+        return jsonify({"ok": False, "error": "Too many attempts. Try again later."}), 429
     data = request.json or {}
     auth = load_config().get("auth", {})
     if (data.get("username") == auth.get("username", "admin") and
             check_password_hash(auth.get("password_hash", ""), data.get("password", ""))):
+        _login_attempts.pop(ip, None)
         session["logged_in"] = True
         return jsonify({"ok": True})
+    attempts.append(now)
+    _login_attempts[ip] = attempts
     return jsonify({"ok": False, "error": "Invalid credentials"}), 401
 
 @app.route("/api/logout", methods=["POST"])
@@ -126,7 +166,9 @@ def api_refresh():
     try:
         scheduled_check()
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)})
+        import logging
+        logging.getLogger(__name__).error(f"Refresh failed: {e}")
+        return jsonify({"status": "error", "message": "Check failed. See server logs."})
     return jsonify({"status": "ok", "timestamp": last_check["timestamp"]})
 
 
@@ -135,7 +177,7 @@ def api_refresh():
 @app.route("/api/history")
 def api_history():
     limit = request.args.get("limit", 500, type=int)
-    return jsonify({"history": get_history(min(limit, 2000))})
+    return jsonify({"history": get_history(max(1, min(limit, 2000)))})
 
 
 # ─── Config ──────────────────────────────────────────────────────────────────
@@ -328,7 +370,8 @@ def api_check_all_endpoints():
 # SHARED HTML / CSS
 # ═════════════════════════════════════════════════════════════════════════════
 
-SHARED_STYLES = """<style>
+SHARED_STYLES = """<script>function esc(s){if(s==null)return'';const d=document.createElement('div');d.textContent=String(s);return d.innerHTML}</script>
+<style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f1117;color:#e1e4e8;padding:0}
 a{color:#58a6ff;text-decoration:none}a:hover{text-decoration:underline}
@@ -399,7 +442,7 @@ def nav(active):
 def page_dashboard():
     return render_template_string("""<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AWS Video Dashboard</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" integrity="sha384-vsrfeLOOY6KuIYKDlmVH5UiBmgIdB1oEf7p01YgWHuqmOHfZr374+odEv96n9tNC" crossorigin="anonymous"></script>
 """ + SHARED_STYLES + """
 <style>
 .health-bar{display:flex;gap:6px;margin-bottom:20px;flex-wrap:wrap}
@@ -537,7 +580,7 @@ async function quickAsk(){
     try{
         const r=await fetch('/api/ai/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg,conversation_id:'dashboard_quick'})});
         const j=await r.json();
-        resp.innerHTML=j.response?j.response.replace(/\\n/g,'<br>').replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>'):'<span style="color:#f85149">No response</span>';
+        resp.innerHTML=j.response?esc(j.response).replace(/\\n/g,'<br>').replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>'):'<span style="color:#f85149">No response</span>';
         if(j.error==='no_api_key')resp.innerHTML='<span style="color:#d29922">Add your OpenRouter API key in <a href="/settings">Settings</a></span>';
     }catch(e){resp.innerHTML='<span style="color:#f85149">Error</span>'}
 }
@@ -580,7 +623,7 @@ async function loadSidebar(statusData){
             `<span class="${down>0?'red':'green'}" style="font-weight:600">${up}/${eps.length} up</span>`+
             (down?` · <span class="red">${down} down</span>`:'')+
             (unk?` · <span style="color:#484f58">${unk} unchecked</span>`:'')+
-            `<div style="margin-top:6px">${eps.slice(0,5).map(e=>{const s=e.last_result?.status||'unknown';return `<div class="issue-row"><span class="dot" style="width:6px;height:6px;border-radius:50%;background:${s==='up'?'#3fb950':s==='down'?'#f85149':'#484f58'}"></span>${e.name}</div>`}).join('')}${eps.length>5?`<div style="font-size:.72rem;color:#484f58;margin-top:4px">+${eps.length-5} more</div>`:''}</div>`;
+            `<div style="margin-top:6px">${eps.slice(0,5).map(e=>{const s=e.last_result?.status||'unknown';return `<div class="issue-row"><span class="dot" style="width:6px;height:6px;border-radius:50%;background:${s==='up'?'#3fb950':s==='down'?'#f85149':'#484f58'}"></span>${esc(e.name)}</div>`}).join('')}${eps.length>5?`<div style="font-size:.72rem;color:#484f58;margin-top:4px">+${eps.length-5} more</div>`:''}</div>`;
     }catch(e){}
 }
 
@@ -623,7 +666,7 @@ function render(j){
     if(totalIssues>0){
         document.getElementById('issues-banner').style.display='block';
         document.getElementById('issues-list').innerHTML=issues.map(i=>
-            `<div class="issue-row">${bg(i.svc,'error')} <b>${i.name}</b> <span style="color:#8b949e">${i.detail}</span></div>`
+            `<div class="issue-row">${bg(i.svc,'error')} <b>${esc(i.name)}</b> <span style="color:#8b949e">${esc(i.detail)}</span></div>`
         ).join('');
     }else{document.getElementById('issues-banner').style.display='none'}
 
@@ -631,12 +674,12 @@ function render(j){
     if(d.rule_alerts&&d.rule_alerts.length){
         document.getElementById('triggered-panel').style.display='block';
         document.getElementById('triggered-list').innerHTML=d.rule_alerts.map(a=>
-            `<div class="issue-row">${a.severity==='critical'?bg('CRIT','error'):a.severity==='warning'?bg('WARN','warn'):bg('INFO','info')} ${a.rule_name} <span style="color:#8b949e;font-size:.75rem">${a.resource}</span></div>`
+            `<div class="issue-row">${a.severity==='critical'?bg('CRIT','error'):a.severity==='warning'?bg('WARN','warn'):bg('INFO','info')} ${esc(a.rule_name)} <span style="color:#8b949e;font-size:.75rem">${esc(a.resource)}</span></div>`
         ).join('');
     }else{document.getElementById('triggered-panel').style.display='none'}
 
     // ── Data Tables ──
-    if(d.ec2.instances.length){document.getElementById('sec-ec2').innerHTML=`<h2 class="section-collapse" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">▾ EC2 Instances (${d.ec2.running})</h2><table><thead><tr><th>Name</th><th>Region</th><th>ID</th><th>Type</th><th>State</th><th>Uptime</th><th>Health</th><th>CPU</th><th>IP</th></tr></thead><tbody>${d.ec2.instances.map(i=>{const ut=i.uptime_display||'—';const utH=i.uptime_hours||0;const utClass=utH>72?'red':utH>24?'yellow':'green';return`<tr><td><b>${i.name}</b></td><td style="font-size:.75rem;color:#8b949e">${i.region||'—'}</td><td style="font-family:monospace;font-size:.78rem">${i.instance_id}</td><td>${i.instance_type}</td><td>${stBg(i.state)}</td><td class="${i.state==='running'?utClass:''}" style="font-weight:600">${i.state==='running'?ut:'—'}</td><td>${i.status_checks==='ok'?bg('OK','ok'):i.status_checks==='impaired'?bg('FAIL','error'):bg(i.status_checks,'warn')}</td><td>${i.cpu_utilization!==null?i.cpu_utilization+'%':'—'}</td><td style="font-family:monospace;font-size:.78rem">${i.public_ip||i.private_ip||'—'}</td></tr>`}).join('')}</tbody></table>`}else{document.getElementById('sec-ec2').innerHTML=''}
+    if(d.ec2.instances.length){document.getElementById('sec-ec2').innerHTML=`<h2 class="section-collapse" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">▾ EC2 Instances (${d.ec2.running})</h2><table><thead><tr><th>Name</th><th>Region</th><th>ID</th><th>Type</th><th>State</th><th>Uptime</th><th>Health</th><th>CPU</th><th>IP</th></tr></thead><tbody>${d.ec2.instances.map(i=>{const ut=i.uptime_display||'—';const utH=i.uptime_hours||0;const utClass=utH>72?'red':utH>24?'yellow':'green';return`<tr><td><b>${esc(i.name)}</b></td><td style="font-size:.75rem;color:#8b949e">${esc(i.region)||'—'}</td><td style="font-family:monospace;font-size:.78rem">${esc(i.instance_id)}</td><td>${i.instance_type}</td><td>${stBg(i.state)}</td><td class="${i.state==='running'?utClass:''}" style="font-weight:600">${i.state==='running'?ut:'—'}</td><td>${i.status_checks==='ok'?bg('OK','ok'):i.status_checks==='impaired'?bg('FAIL','error'):bg(i.status_checks,'warn')}</td><td>${i.cpu_utilization!==null?i.cpu_utilization+'%':'—'}</td><td style="font-family:monospace;font-size:.78rem">${i.public_ip||i.private_ip||'—'}</td></tr>`}).join('')}</tbody></table>`}else{document.getElementById('sec-ec2').innerHTML=''}
 
     if(d.deployments.items.length){document.getElementById('sec-deploy').innerHTML=`<h2 class="section-collapse" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">▾ Deployments (${d.deployments.total})</h2><table><thead><tr><th>App</th><th>Group</th><th>Status</th><th>Time</th></tr></thead><tbody>${d.deployments.items.map(x=>`<tr><td>${x.application}</td><td>${x.group}</td><td>${dpBg(x.status)}</td><td>${new Date(x.create_time).toLocaleString()}</td></tr>`).join('')}</tbody></table>`}else{document.getElementById('sec-deploy').innerHTML=''}
 
@@ -648,7 +691,7 @@ function render(j){
 
     if(d.ivs&&d.ivs.channels.length){document.getElementById('sec-ivs').innerHTML=`<h2 class="section-collapse" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">▾ IVS (${d.ivs.live} live)</h2><table><thead><tr><th>Channel</th><th>State</th><th>Health</th><th>Viewers</th></tr></thead><tbody>${d.ivs.channels.map(ch=>`<tr><td><b>${ch.name}</b></td><td>${ch.state==='LIVE'?bg('LIVE','ok'):bg('OFF','off')}</td><td>${ch.stream_health==='HEALTHY'?bg('OK','ok'):ch.stream_health==='UNHEALTHY'?bg('BAD','error'):bg(ch.stream_health,'off')}</td><td>${ch.viewer_count}</td></tr>`).join('')}</tbody></table>`}else{document.getElementById('sec-ivs').innerHTML=''}
 
-    if(em&&em.endpoints.length){document.getElementById('sec-endpoints').innerHTML=`<h2 class="section-collapse" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">▾ Endpoints (${em.up}/${em.total} up)</h2><table><thead><tr><th>Name</th><th>Type</th><th>Status</th><th>Response</th><th>Error</th></tr></thead><tbody>${em.endpoints.map(e=>`<tr><td><b>${e.endpoint_name}</b></td><td>${bg(e.endpoint_type,'info')}</td><td>${e.status==='up'?bg('UP','ok'):e.status==='degraded'?bg('DEGRADED','warn'):bg('DOWN','error')}</td><td>${e.response_time_ms?e.response_time_ms+'ms':'—'}</td><td style="font-size:.78rem;color:#f85149;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${e.error||'—'}</td></tr>`).join('')}</tbody></table>`}else{document.getElementById('sec-endpoints').innerHTML=''}
+    if(em&&em.endpoints.length){document.getElementById('sec-endpoints').innerHTML=`<h2 class="section-collapse" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">▾ Endpoints (${em.up}/${em.total} up)</h2><table><thead><tr><th>Name</th><th>Type</th><th>Status</th><th>Response</th><th>Error</th></tr></thead><tbody>${em.endpoints.map(e=>`<tr><td><b>${esc(e.endpoint_name)}</b></td><td>${bg(e.endpoint_type,'info')}</td><td>${e.status==='up'?bg('UP','ok'):e.status==='degraded'?bg('DEGRADED','warn'):bg('DOWN','error')}</td><td>${e.response_time_ms?e.response_time_ms+'ms':'—'}</td><td style="font-size:.78rem;color:#f85149;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.error)||'—'}</td></tr>`).join('')}</tbody></table>`}else{document.getElementById('sec-endpoints').innerHTML=''}
 }
 
 fetchStatus();loadHistory();setInterval(fetchStatus,60000);
@@ -951,14 +994,14 @@ async function loadEndpoints(){
             <div>
                 <div class="ep-status">
                     <span class="ep-dot ${st}"></span>
-                    <b style="font-size:.9rem">${ep.name}</b>
+                    <b style="font-size:.9rem">${esc(ep.name)}</b>
                     ${bg(typeLabel,'info')}
                     ${st==='up'?bg('UP','ok'):st==='down'?bg('DOWN','error'):st==='degraded'?bg('DEGRADED','warn'):bg('UNCHECKED','off')}
                     ${r&&r.response_time_ms?`<span style="font-size:.78rem;color:#8b949e">${r.response_time_ms}ms</span>`:''}
                 </div>
-                <div style="font-size:.78rem;color:#484f58;margin-top:4px;font-family:monospace">${target}</div>
-                ${r&&r.error?`<div style="font-size:.75rem;color:#f85149;margin-top:2px">${r.error}</div>`:''}
-                <div style="margin-top:4px">${(ep.tags||[]).map(t=>'<span class="badge off" style="font-size:.65rem;margin-right:2px">'+t+'</span>').join('')}
+                <div style="font-size:.78rem;color:#484f58;margin-top:4px;font-family:monospace">${esc(target)}</div>
+                ${r&&r.error?`<div style="font-size:.75rem;color:#f85149;margin-top:2px">${esc(r.error)}</div>`:''}
+                <div style="margin-top:4px">${(ep.tags||[]).map(t=>'<span class="badge off" style="font-size:.65rem;margin-right:2px">'+esc(t)+'</span>').join('')}
                 ${r?`<span style="font-size:.7rem;color:#484f58;margin-left:8px">${new Date(r.checked_at).toLocaleTimeString()}</span>`:''}</div>
             </div>
             <div style="display:flex;gap:5px;align-items:center">
@@ -1176,8 +1219,8 @@ async function loadRules(){
     // Templates
     document.getElementById('templates').innerHTML=data.templates.map((t,i)=>`
         <div class="tpl-card" onclick="addTemplate(${i})">
-            <div class="tname">${t.name}</div>
-            <div class="tdesc">${t.service} → ${t.metric} ${t.operator} ${t.threshold} (${t.severity})</div>
+            <div class="tname">${esc(t.name)}</div>
+            <div class="tdesc">${esc(t.service)} → ${esc(t.metric)} ${esc(t.operator)} ${t.threshold} (${esc(t.severity)})</div>
         </div>`).join('');
 
     // Rules
@@ -1189,7 +1232,7 @@ async function loadRules(){
     document.getElementById('rules-list').innerHTML=rules.map(r=>`
         <div class="rule-card ${r.enabled?'':'disabled'}">
             <div>
-                <div style="font-weight:600;font-size:.9rem">${r.name}</div>
+                <div style="font-weight:600;font-size:.9rem">${esc(r.name)}</div>
                 <div class="rule-meta">
                     ${sevBadge(r.severity)}
                     <span class="badge info">${r.service}</span>
@@ -1293,7 +1336,7 @@ function addMsg(role,content,meta=''){
     const el=document.getElementById('messages');
     const div=document.createElement('div');
     div.className='msg '+role;
-    div.innerHTML=`<div class="bubble">${role==='ai'?renderMd(content):content}</div>${meta?'<div class="meta">'+meta+'</div>':''}`;
+    div.innerHTML=`<div class="bubble">${role==='ai'?renderMd(content):esc(content)}</div>${meta?'<div class="meta">'+esc(meta)+'</div>':''}`;
     el.appendChild(div);
     el.scrollTop=el.scrollHeight;
 }
@@ -1339,7 +1382,7 @@ async function loadModels(){
     const res=await fetch('/api/ai/models');
     const data=await res.json();
     const sel=document.getElementById('ai-model');
-    data.models.forEach(m=>{sel.innerHTML+=`<option value="${m.id}">${m.name}</option>`});
+    data.models.forEach(m=>{sel.innerHTML+=`<option value="${esc(m.id)}">${esc(m.name)}</option>`});
 }
 loadModels();
 </script></body></html>""")
@@ -1550,7 +1593,7 @@ async function loadCfg(){
     fetch('/api/ai/models').then(r=>r.json()).then(d=>{
         const sel=document.getElementById('ai-model');
         sel.innerHTML='';
-        d.models.forEach(m=>{sel.innerHTML+=`<option value="${m.id}">${m.name} (${m.context})</option>`});
+        d.models.forEach(m=>{sel.innerHTML+=`<option value="${esc(m.id)}">${esc(m.name)} (${esc(m.context)})</option>`});
         sel.value=ai.model||'anthropic/claude-sonnet-4.6';
     });
     document.getElementById('ai-maxt').value=ai.max_tokens||2048;

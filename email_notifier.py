@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 def _build_html_email(subject: str, body_text: str) -> str:
     """Wrap alert text in a styled HTML email."""
+    import html
+    subject = html.escape(subject)
+    body_text = html.escape(body_text)
     # Convert newlines and markdown-ish formatting
     body_html = body_text.replace("\n", "<br>")
     body_html = body_html.replace("🚨", '<span style="font-size:1.2em">🚨</span>')

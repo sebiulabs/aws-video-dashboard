@@ -39,6 +39,7 @@ Lightweight checks you can add from the UI to monitor anything:
     - Encoding API health endpoints
 """
 
+import ipaddress
 import logging
 import socket
 import subprocess
@@ -48,6 +49,7 @@ import json
 from datetime import datetime, timezone
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse
 
 import requests
 
@@ -57,6 +59,35 @@ logger = logging.getLogger(__name__)
 
 # Maximum concurrent checks
 MAX_WORKERS = 10
+
+# SSRF protection — block private/internal networks
+_BLOCKED_NETWORKS = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),       # link-local / IMDS
+    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),              # IPv6 private
+    ipaddress.ip_network("fe80::/10"),             # IPv6 link-local
+]
+
+
+def _is_blocked_host(hostname: str) -> bool:
+    """Return True if hostname resolves to a private/blocked IP."""
+    if not hostname:
+        return True
+    try:
+        addr_info = socket.getaddrinfo(hostname, None)
+        for family, _, _, _, sockaddr in addr_info:
+            ip = ipaddress.ip_address(sockaddr[0])
+            for net in _BLOCKED_NETWORKS:
+                if ip in net:
+                    return True
+    except (socket.gaierror, ValueError):
+        return True  # unresolvable = blocked
+    return False
 
 
 # ─── Endpoint CRUD ──────────────────────────────────────────────────────────
@@ -197,9 +228,18 @@ def _check_http(ep: dict) -> dict:
         "error": None,
     }
 
+    # SSRF protection
+    try:
+        hostname = urlparse(url).hostname or ""
+    except Exception:
+        hostname = ""
+    if _is_blocked_host(hostname):
+        result["error"] = "Blocked: private/internal address"
+        return result
+
     try:
         start = time.monotonic()
-        resp = requests.request(method, url, timeout=timeout, allow_redirects=True,
+        resp = requests.request(method, url, timeout=timeout, allow_redirects=False,
                                 headers={"User-Agent": "AWS-Dashboard-Monitor/1.0"})
         elapsed = round((time.monotonic() - start) * 1000, 1)
 
@@ -239,6 +279,11 @@ def _check_tcp(ep: dict) -> dict:
     timeout = ep.get("timeout_seconds", 10)
 
     result = {"status": "down", "response_time_ms": 0, "error": None}
+
+    # SSRF protection
+    if _is_blocked_host(host):
+        result["error"] = "Blocked: private/internal address"
+        return result
 
     try:
         start = time.monotonic()
@@ -280,14 +325,14 @@ def _resolve_json_path(data: dict, path: str):
 
 def _check_json_api(ep: dict) -> dict:
     """JSON API endpoint — fetch and extract a value via json_path."""
-    http_result = _check_http(ep)
+    http_result = _check_http(ep)  # SSRF check happens inside _check_http
     result = {**http_result, "json_value": None, "json_path": ep.get("json_path", "")}
 
     if http_result["status"] != "down" and ep.get("json_path"):
         try:
             url = ep.get("url", "")
             timeout = ep.get("timeout_seconds", 10)
-            resp = requests.get(url, timeout=timeout,
+            resp = requests.get(url, timeout=timeout, allow_redirects=False,
                                 headers={"User-Agent": "AWS-Dashboard-Monitor/1.0"})
             data = resp.json()
             value = _resolve_json_path(data, ep["json_path"])
@@ -304,6 +349,17 @@ def _check_ping(ep: dict) -> dict:
     timeout = ep.get("timeout_seconds", 5)
 
     result = {"status": "down", "response_time_ms": 0, "error": None, "packet_loss": 100}
+
+    # SSRF protection
+    if _is_blocked_host(host):
+        result["error"] = "Blocked: private/internal address"
+        return result
+
+    # Sanitise host to prevent command injection (only allow alphanumeric, dots, hyphens)
+    import re
+    if not re.match(r'^[a-zA-Z0-9._-]+$', host):
+        result["error"] = "Invalid hostname"
+        return result
 
     try:
         # Linux ping: -c count, -W timeout

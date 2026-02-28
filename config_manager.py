@@ -124,6 +124,7 @@ def save_config(config: dict) -> bool:
     try:
         with open(CONFIG_PATH, "w") as f:
             json.dump(config, f, indent=2)
+        os.chmod(CONFIG_PATH, 0o600)
         return True
     except IOError as e:
         logger.error(f"Failed to save config: {e}")
@@ -141,9 +142,11 @@ def get_masked_config() -> dict:
     config = load_config()
 
     def mask(val: str) -> str:
-        if not val or len(val) < 8:
-            return "••••" if val else ""
-        return val[:4] + "•" * (len(val) - 8) + val[-4:]
+        if not val:
+            return ""
+        if len(val) <= 4:
+            return "••••"
+        return "••••••••" + val[-4:]
 
     c = json.loads(json.dumps(config))
 

@@ -12,6 +12,10 @@ build/
 
 # Config with secrets
 config.json
+.env
+*.env
+*.pem
+*.key
 
 # IDE
 .vscode/
@@ -26,6 +30,7 @@ Thumbs.db
 # App runtime
 gunicorn.ctl
 history.db
+.flask_secret
 *.log
 *.pid
 

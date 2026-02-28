@@ -27,8 +27,11 @@ TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
 
 def _convert_to_html(text: str) -> str:
     """Convert our alert format (markdown-ish) to Telegram HTML."""
-    # Bold markers: *text* → <b>text</b>
+    import html
     import re
+    # Escape HTML first, then apply our formatting
+    text = html.escape(text)
+    # Bold markers: *text* → <b>text</b>
     text = re.sub(r'\*([^*]+)\*', r'<b>\1</b>', text)
     # Bullet points stay as-is (Telegram renders them fine)
     return text
