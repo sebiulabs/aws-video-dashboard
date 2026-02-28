@@ -12,6 +12,30 @@ Everything is configured from the web UI. No YAML files, no Terraform, no config
 
 ---
 
+## Screenshots
+
+**Dashboard** — Health bar, EC2 instances, active issues, trend graph, quick AI ask, triggered rules
+
+![Dashboard](screenshots/dashboard.png)
+
+**Alerts** — Pre-built templates for MediaLive, CloudFront, ECS, endpoints + custom rules
+
+![Alerts](screenshots/alerts.png)
+
+**Endpoint Monitors** — HTTP, TCP, Ping, JSON API checks with quick-add templates
+
+![Monitors](screenshots/monitors.png)
+
+**AI Assistant** — Ask about your infrastructure in plain English (OpenRouter)
+
+![AI Assistant](screenshots/ai-assistant.png)
+
+**Settings** — AWS regions, service toggles, notifications, AI model, security — all from the UI
+
+![Settings](screenshots/settings.png)
+
+---
+
 ## Features
 
 | Feature | Description |
