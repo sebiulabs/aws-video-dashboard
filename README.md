@@ -290,10 +290,6 @@ No external database. SQLite for history, JSON for config. Single-process friend
 
 GNU General Public License v3.0 — see [LICENSE](LICENSE).
 
-## Contributing
-
-Contributions welcome. Please open an issue first to discuss what you'd like to change.
-
 ---
 
 Built by [Sebiu Labs](https://sebiulabs.co.uk)
