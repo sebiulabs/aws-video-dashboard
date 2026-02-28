@@ -52,7 +52,7 @@ jobs:
           # Test defaults load
           cfg = load_config()
           assert cfg['aws']['region'] == 'eu-west-2', 'Default region wrong'
-          assert cfg['monitoring']['check_interval_minutes'] == 5, 'Default interval wrong'
+          assert cfg['monitoring']['check_interval_seconds'] == 300, 'Default interval wrong'
           print('defaults OK')
 
           # Test save + load round-trip
