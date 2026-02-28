@@ -22,7 +22,6 @@ DEFAULT_CONFIG = {
     "monitoring": {
         "check_interval_minutes": 5,
         "cpu_threshold": 80.0,
-        "memory_threshold": 80.0,
         "deployment_lookback_hours": 24,
         "uptime_alert_hours": 24,
         "monitor_ec2": True,

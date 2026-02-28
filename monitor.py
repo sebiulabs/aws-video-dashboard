@@ -301,18 +301,19 @@ def send_notifications(subject: str, body: str, config: Optional[dict] = None) -
 
 # ─── Alert Formatting ────────────────────────────────────────────────────────
 
-def format_alert_message(instances, deployments, media_data=None, endpoint_data=None) -> Optional[str]:
+def format_alert_message(instances, deployments, media_data=None, endpoint_data=None, config=None) -> Optional[str]:
     lines = []
+    notif = (config or {}).get("notifications", {})
 
     problem = [i for i in instances if not i.healthy and i.state != "stopped"]
-    if problem:
+    if problem and notif.get("on_ec2_issues", True):
         lines.append("[ALERT] *EC2 Issues*")
         for inst in problem:
             lines.append(f"• {inst.name} ({inst.instance_id}): {', '.join(inst.alerts)}")
         lines.append("")
 
     failed = [d for d in deployments if d.status in ("Failed", "Stopped")]
-    if failed:
+    if failed and notif.get("on_deploy_failures", True):
         lines.append("[ALERT] *Deployment Failures*")
         for dep in failed:
             lines.append(f"• {dep.application}/{dep.group}: {dep.status}")
@@ -321,7 +322,7 @@ def format_alert_message(instances, deployments, media_data=None, endpoint_data=
         lines.append("")
 
     # Media service alerts
-    if media_data:
+    if media_data and notif.get("on_media_issues", True):
         ml = media_data.get("medialive", {})
         if ml.get("channels"):
             unhealthy = [c for c in ml["channels"] if not c["healthy"] and c["state"] == "RUNNING"]
@@ -368,6 +369,61 @@ def format_alert_message(instances, deployments, media_data=None, endpoint_data=
     if lines:
         return f"AWS Alert — {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n" + "\n".join(lines)
     return None
+
+
+# ─── Daily Summary ──────────────────────────────────────────────────────────
+
+def generate_daily_summary(summary: dict) -> str:
+    """Build a plain-text daily infrastructure digest."""
+    lines = ["*Daily Infrastructure Summary*", ""]
+
+    ec2 = summary.get("ec2", {})
+    lines.append(f"EC2: {ec2.get('running', 0)} running / {ec2.get('total', 0)} total, {ec2.get('healthy', 0)} healthy")
+
+    dep = summary.get("deployments", {})
+    if dep.get("total", 0):
+        lines.append(f"Deployments (24h): {dep.get('succeeded', 0)} succeeded, {dep.get('failed', 0)} failed")
+
+    ecs = summary.get("ecs_services", [])
+    if ecs:
+        healthy_ecs = len([s for s in ecs if s.get("healthy")])
+        lines.append(f"ECS: {healthy_ecs}/{len(ecs)} services healthy")
+
+    for svc, label in [("medialive", "MediaLive"), ("mediaconnect", "MediaConnect"),
+                        ("cloudfront", "CloudFront"), ("ivs", "IVS")]:
+        data = summary.get(svc, {})
+        items = data.get("channels", data.get("flows", data.get("distributions", data.get("streams", []))))
+        if items:
+            healthy = len([i for i in items if i.get("healthy")])
+            lines.append(f"{label}: {healthy}/{len(items)} healthy")
+
+    em = summary.get("easy_monitor", {})
+    if em.get("total", 0):
+        lines.append(f"Endpoints: {em.get('up', 0)}/{em.get('total', 0)} up")
+
+    rules = summary.get("rule_alerts", [])
+    if rules:
+        lines.append(f"\nAlert rules triggered: {len(rules)}")
+        for r in rules[:5]:
+            lines.append(f"• {r['rule_name']}: {r['message'][:100]}")
+
+    lines.append(f"\nGenerated {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}")
+    return "\n".join(lines)
+
+
+def send_daily_summary() -> None:
+    """Run a full check and send the summary to all enabled channels."""
+    config = load_config()
+    notif = config.get("notifications", {})
+    if not notif.get("enabled") or not notif.get("send_daily_summary"):
+        return
+    try:
+        summary = run_check(send_alerts=False)
+        body = generate_daily_summary(summary)
+        send_to_channels("AWS Daily Summary", body, config)
+        logger.info("Daily summary sent")
+    except Exception as e:
+        logger.error(f"Daily summary failed: {e}")
 
 
 # ─── Summary + Main Check ───────────────────────────────────────────────────
@@ -430,7 +486,7 @@ def run_check(send_alerts: bool = True) -> dict:
 
     if send_alerts:
         # Built-in alerts
-        alert_msg = format_alert_message(instances, deployments, media_data, endpoint_results)
+        alert_msg = format_alert_message(instances, deployments, media_data, endpoint_results, config)
         if alert_msg:
             results = send_notifications("AWS Infrastructure Alert", alert_msg, config)
             summary["notification_results"] = results

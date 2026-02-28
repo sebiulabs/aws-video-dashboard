@@ -17,7 +17,7 @@ from flask import Flask, jsonify, render_template_string, request
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from config_manager import load_config, save_config, update_config, get_masked_config
-from monitor import run_check, send_whatsapp, send_notifications
+from monitor import run_check, send_whatsapp, send_notifications, send_daily_summary
 from email_notifier import send_email
 from telegram_notifier import send_telegram
 from slack_notifier import send_slack
@@ -1481,6 +1481,10 @@ loadCfg();
 def start_scheduler():
     scheduler = BackgroundScheduler()
     scheduler.add_job(scheduled_check, "interval", minutes=5)
+    # Daily summary — runs every hour, checks if it's the configured hour
+    config = load_config()
+    summary_hour = config.get("notifications", {}).get("daily_summary_hour", 9)
+    scheduler.add_job(send_daily_summary, "cron", hour=summary_hour, minute=0)
     scheduler.start()
     try:
         scheduled_check()
