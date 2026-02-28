@@ -35,6 +35,8 @@ Pick whichever method suits your setup. The dashboard runs on a single port (500
 
 ### Option 1: Docker (recommended)
 
+Works on **Linux, Mac, and Windows**. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Windows/Mac) or Docker Engine (Linux), then:
+
 ```bash
 git clone https://github.com/sebiulabs/aws-video-dashboard.git
 cd aws-video-dashboard
@@ -43,10 +45,17 @@ docker compose up -d
 
 Open `http://localhost:5000` and add your AWS credentials in Settings.
 
+**Windows users:** Docker Desktop runs Linux containers through WSL2 — no Linux knowledge needed. Just install Docker Desktop, open PowerShell or Command Prompt, and run the commands above. Everything works the same.
+
 To use a custom secret key:
 
 ```bash
+# Linux / Mac
 FLASK_SECRET_KEY=$(openssl rand -hex 32) docker compose up -d
+
+# Windows PowerShell
+$env:FLASK_SECRET_KEY = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Max 256) })
+docker compose up -d
 ```
 
 ### Option 2: Docker Run (no Compose)
