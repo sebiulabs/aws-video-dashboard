@@ -21,8 +21,8 @@ from botocore.exceptions import ClientError
 logger = logging.getLogger(__name__)
 
 
-def _get_boto_kwargs(config: dict) -> dict:
-    kwargs = {"region_name": config["aws"]["region"]}
+def _get_boto_kwargs(config: dict, region: str = None) -> dict:
+    kwargs = {"region_name": region or config["aws"]["region"]}
     if config["aws"]["access_key_id"] and config["aws"]["secret_access_key"]:
         kwargs["aws_access_key_id"] = config["aws"]["access_key_id"]
         kwargs["aws_secret_access_key"] = config["aws"]["secret_access_key"]
@@ -33,12 +33,12 @@ def _get_boto_kwargs(config: dict) -> dict:
 # AWS MEDIALIVE
 # ═════════════════════════════════════════════════════════════════════════════
 
-def check_medialive(config: dict) -> dict:
+def check_medialive(config: dict, region: str = None) -> dict:
     """
     Check all MediaLive channels: state, pipeline status, inputs, alerts.
     """
-    client = boto3.client("medialive", **_get_boto_kwargs(config))
-    cw = boto3.client("cloudwatch", **_get_boto_kwargs(config))
+    client = boto3.client("medialive", **_get_boto_kwargs(config, region))
+    cw = boto3.client("cloudwatch", **_get_boto_kwargs(config, region))
     channels = []
 
     try:
@@ -138,9 +138,9 @@ def check_medialive(config: dict) -> dict:
 # AWS MEDIACONNECT
 # ═════════════════════════════════════════════════════════════════════════════
 
-def check_mediaconnect(config: dict) -> dict:
+def check_mediaconnect(config: dict, region: str = None) -> dict:
     """Check MediaConnect flows: status, source health, outputs."""
-    client = boto3.client("mediaconnect", **_get_boto_kwargs(config))
+    client = boto3.client("mediaconnect", **_get_boto_kwargs(config, region))
     flows = []
 
     try:
@@ -201,9 +201,9 @@ def check_mediaconnect(config: dict) -> dict:
 # AWS MEDIAPACKAGE
 # ═════════════════════════════════════════════════════════════════════════════
 
-def check_mediapackage(config: dict) -> dict:
+def check_mediapackage(config: dict, region: str = None) -> dict:
     """Check MediaPackage channels and origin endpoints."""
-    client = boto3.client("mediapackage", **_get_boto_kwargs(config))
+    client = boto3.client("mediapackage", **_get_boto_kwargs(config, region))
     channels = []
 
     try:
@@ -259,10 +259,10 @@ def check_mediapackage(config: dict) -> dict:
 # CLOUDFRONT CDN
 # ═════════════════════════════════════════════════════════════════════════════
 
-def check_cloudfront(config: dict) -> dict:
+def check_cloudfront(config: dict, region: str = None) -> dict:
     """Check CloudFront distributions: status, error rates."""
-    client = boto3.client("cloudfront", **_get_boto_kwargs(config))
-    cw = boto3.client("cloudwatch", **_get_boto_kwargs(config))
+    client = boto3.client("cloudfront", **_get_boto_kwargs(config, region))
+    cw = boto3.client("cloudwatch", **_get_boto_kwargs(config, region))
     distributions = []
 
     try:
@@ -340,9 +340,9 @@ def check_cloudfront(config: dict) -> dict:
 # AMAZON IVS (Interactive Video Service)
 # ═════════════════════════════════════════════════════════════════════════════
 
-def check_ivs(config: dict) -> dict:
+def check_ivs(config: dict, region: str = None) -> dict:
     """Check IVS channels: state, active streams, stream health."""
-    client = boto3.client("ivs", **_get_boto_kwargs(config))
+    client = boto3.client("ivs", **_get_boto_kwargs(config, region))
     channels = []
 
     try:

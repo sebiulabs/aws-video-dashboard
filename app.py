@@ -12,8 +12,10 @@ Visit: http://localhost:5000
 """
 
 import json
+import os
 from datetime import datetime
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, jsonify, render_template_string, request, session, redirect
+from werkzeug.security import generate_password_hash, check_password_hash
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from config_manager import load_config, save_config, update_config, get_masked_config
@@ -22,6 +24,7 @@ from email_notifier import send_email
 from telegram_notifier import send_telegram
 from slack_notifier import send_slack
 from openrouter_ai import query_openrouter, get_available_models
+from history_db import save_snapshot, get_history
 from alert_rules import (
     get_rules, add_rule, update_rule, delete_rule, add_template,
     SERVICE_METRICS, RULE_TEMPLATES,
@@ -32,15 +35,74 @@ from easy_monitor import (
 )
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(24).hex())
 
 last_check = {"data": None, "timestamp": None}
 ai_conversations = {}  # session-less conversation store (keyed by simple ID)
+
+
+@app.before_request
+def require_login():
+    auth = load_config().get("auth", {})
+    if not auth.get("password_hash"):
+        return None
+    if request.endpoint in ("page_login", "api_login"):
+        return None
+    if not session.get("logged_in"):
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "unauthorized"}), 401
+        return redirect("/login")
 
 
 def scheduled_check():
     result = run_check(send_alerts=True)
     last_check["data"] = result
     last_check["timestamp"] = datetime.utcnow().isoformat()
+    save_snapshot(result)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# AUTH
+# ═════════════════════════════════════════════════════════════════════════════
+
+@app.route("/login")
+def page_login():
+    return render_template_string("""<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Login — AWS Video Dashboard</title>""" + SHARED_STYLES + """
+<style>.login-box{max-width:360px;margin:80px auto;background:#161b22;border:1px solid #21262d;border-radius:8px;padding:30px}
+.login-box h2{text-align:center;color:#58a6ff;margin-bottom:20px;font-size:1.1rem}</style>
+</head><body>
+<div class="login-box">
+    <h2>AWS Video Dashboard</h2>
+    <div class="field"><label>Username</label><input type="text" id="user" autofocus></div>
+    <div class="field"><label>Password</label><input type="password" id="pass" onkeydown="if(event.key==='Enter')doLogin()"></div>
+    <div id="err" style="color:#f85149;font-size:.82rem;margin:8px 0;display:none"></div>
+    <button class="btn p" onclick="doLogin()" style="width:100%;margin-top:12px;justify-content:center">Login</button>
+</div>
+<script>
+async function doLogin(){
+    const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({username:document.getElementById('user').value,password:document.getElementById('pass').value})});
+    const j=await r.json();
+    if(j.ok){window.location='/'}
+    else{const e=document.getElementById('err');e.textContent=j.error||'Invalid credentials';e.style.display='block'}
+}
+</script></body></html>""")
+
+@app.route("/api/login", methods=["POST"])
+def api_login():
+    data = request.json or {}
+    auth = load_config().get("auth", {})
+    if (data.get("username") == auth.get("username", "admin") and
+            check_password_hash(auth.get("password_hash", ""), data.get("password", ""))):
+        session["logged_in"] = True
+        return jsonify({"ok": True})
+    return jsonify({"ok": False, "error": "Invalid credentials"}), 401
+
+@app.route("/api/logout", methods=["POST"])
+def api_logout():
+    session.clear()
+    return jsonify({"ok": True})
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -66,6 +128,14 @@ def api_refresh():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)})
     return jsonify({"status": "ok", "timestamp": last_check["timestamp"]})
+
+
+# ─── History ─────────────────────────────────────────────────────────────────
+
+@app.route("/api/history")
+def api_history():
+    limit = request.args.get("limit", 500, type=int)
+    return jsonify({"history": get_history(min(limit, 2000))})
 
 
 # ─── Config ──────────────────────────────────────────────────────────────────
@@ -94,11 +164,29 @@ def api_save_config():
                         ["twilio_account_sid", "twilio_auth_token"])
         preserve_masked(ch.get("email", {}), current["notifications"]["channels"]["email"], ["smtp_password"])
         preserve_masked(ch.get("telegram", {}), current["notifications"]["channels"]["telegram"], ["bot_token"])
+        preserve_masked(ch.get("slack", {}), current["notifications"]["channels"].get("slack", {}), ["webhook_url"])
         em = ch.get("email", {})
         if "to_addresses" in em and isinstance(em["to_addresses"], str):
             em["to_addresses"] = [a.strip() for a in em["to_addresses"].split(",") if a.strip()]
 
+    # Auth — hash password, never store plaintext
+    if "auth" in incoming:
+        auth_in = incoming["auth"]
+        new_pass = auth_in.pop("password", "")
+        auth_in.pop("password2", None)
+        if new_pass:
+            auth_in["password_hash"] = generate_password_hash(new_pass)
+        else:
+            auth_in["password_hash"] = current.get("auth", {}).get("password_hash", "")
+
     updated = update_config(incoming)
+    # Reschedule if interval changed
+    if _scheduler and "monitoring" in incoming:
+        new_interval = max(1, incoming["monitoring"].get("check_interval_minutes", 5))
+        try:
+            _scheduler.reschedule_job("main_check", trigger="interval", minutes=new_interval)
+        except Exception:
+            pass
     return jsonify({"status": "ok", "config": get_masked_config()})
 
 
@@ -299,7 +387,8 @@ def nav(active):
     pages = [("Dashboard", "/", "dashboard"), ("Monitors", "/monitors", "monitors"), ("Alerts", "/alerts", "alerts"),
              ("AI Assistant", "/ai", "ai"), ("Settings", "/settings", "settings")]
     links = "".join(f'<a href="{url}" class="nl {"active" if key==active else ""}">{name}</a>' for name, url, key in pages)
-    return f'<nav class="topnav"><span class="logo">AWS Video Dashboard</span>{links}</nav>'
+    logout = '<a href="#" class="nl" onclick="fetch(\'/api/logout\',{method:\'POST\'}).then(()=>location=\'/login\')" style="margin-left:auto;font-size:.78rem">Logout</a>'
+    return f'<nav class="topnav"><span class="logo">AWS Video Dashboard</span>{links}{logout}</nav>'
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -309,7 +398,9 @@ def nav(active):
 @app.route("/")
 def page_dashboard():
     return render_template_string("""<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AWS Video Dashboard</title>""" + SHARED_STYLES + """
+<title>AWS Video Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+""" + SHARED_STYLES + """
 <style>
 .health-bar{display:flex;gap:6px;margin-bottom:20px;flex-wrap:wrap}
 .health-pill{padding:8px 16px;border-radius:8px;border:1px solid #21262d;background:#161b22;cursor:pointer;transition:.15s;text-decoration:none;display:flex;align-items:center;gap:8px}
@@ -383,6 +474,12 @@ def page_dashboard():
 
 <!-- Sidebar -->
 <div>
+    <!-- Trend Chart -->
+    <div class="sidebar-panel">
+        <h4>Trend (24h)</h4>
+        <canvas id="history-chart" height="180"></canvas>
+    </div>
+
     <!-- AI Quick Ask -->
     <div class="sidebar-panel">
         <h4>Quick Ask <a href="/ai" style="font-size:.72rem;font-weight:normal">Open full chat →</a></h4>
@@ -539,7 +636,7 @@ function render(j){
     }else{document.getElementById('triggered-panel').style.display='none'}
 
     // ── Data Tables ──
-    if(d.ec2.instances.length){document.getElementById('sec-ec2').innerHTML=`<h2 class="section-collapse" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">▾ EC2 Instances (${d.ec2.running})</h2><table><thead><tr><th>Name</th><th>ID</th><th>Type</th><th>State</th><th>Uptime</th><th>Health</th><th>CPU</th><th>IP</th></tr></thead><tbody>${d.ec2.instances.map(i=>{const ut=i.uptime_display||'—';const utH=i.uptime_hours||0;const utClass=utH>72?'red':utH>24?'yellow':'green';return`<tr><td><b>${i.name}</b></td><td style="font-family:monospace;font-size:.78rem">${i.instance_id}</td><td>${i.instance_type}</td><td>${stBg(i.state)}</td><td class="${i.state==='running'?utClass:''}" style="font-weight:600">${i.state==='running'?ut:'—'}</td><td>${i.status_checks==='ok'?bg('OK','ok'):i.status_checks==='impaired'?bg('FAIL','error'):bg(i.status_checks,'warn')}</td><td>${i.cpu_utilization!==null?i.cpu_utilization+'%':'—'}</td><td style="font-family:monospace;font-size:.78rem">${i.public_ip||i.private_ip||'—'}</td></tr>`}).join('')}</tbody></table>`}else{document.getElementById('sec-ec2').innerHTML=''}
+    if(d.ec2.instances.length){document.getElementById('sec-ec2').innerHTML=`<h2 class="section-collapse" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">▾ EC2 Instances (${d.ec2.running})</h2><table><thead><tr><th>Name</th><th>Region</th><th>ID</th><th>Type</th><th>State</th><th>Uptime</th><th>Health</th><th>CPU</th><th>IP</th></tr></thead><tbody>${d.ec2.instances.map(i=>{const ut=i.uptime_display||'—';const utH=i.uptime_hours||0;const utClass=utH>72?'red':utH>24?'yellow':'green';return`<tr><td><b>${i.name}</b></td><td style="font-size:.75rem;color:#8b949e">${i.region||'—'}</td><td style="font-family:monospace;font-size:.78rem">${i.instance_id}</td><td>${i.instance_type}</td><td>${stBg(i.state)}</td><td class="${i.state==='running'?utClass:''}" style="font-weight:600">${i.state==='running'?ut:'—'}</td><td>${i.status_checks==='ok'?bg('OK','ok'):i.status_checks==='impaired'?bg('FAIL','error'):bg(i.status_checks,'warn')}</td><td>${i.cpu_utilization!==null?i.cpu_utilization+'%':'—'}</td><td style="font-family:monospace;font-size:.78rem">${i.public_ip||i.private_ip||'—'}</td></tr>`}).join('')}</tbody></table>`}else{document.getElementById('sec-ec2').innerHTML=''}
 
     if(d.deployments.items.length){document.getElementById('sec-deploy').innerHTML=`<h2 class="section-collapse" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">▾ Deployments (${d.deployments.total})</h2><table><thead><tr><th>App</th><th>Group</th><th>Status</th><th>Time</th></tr></thead><tbody>${d.deployments.items.map(x=>`<tr><td>${x.application}</td><td>${x.group}</td><td>${dpBg(x.status)}</td><td>${new Date(x.create_time).toLocaleString()}</td></tr>`).join('')}</tbody></table>`}else{document.getElementById('sec-deploy').innerHTML=''}
 
@@ -554,7 +651,31 @@ function render(j){
     if(em&&em.endpoints.length){document.getElementById('sec-endpoints').innerHTML=`<h2 class="section-collapse" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">▾ Endpoints (${em.up}/${em.total} up)</h2><table><thead><tr><th>Name</th><th>Type</th><th>Status</th><th>Response</th><th>Error</th></tr></thead><tbody>${em.endpoints.map(e=>`<tr><td><b>${e.endpoint_name}</b></td><td>${bg(e.endpoint_type,'info')}</td><td>${e.status==='up'?bg('UP','ok'):e.status==='degraded'?bg('DEGRADED','warn'):bg('DOWN','error')}</td><td>${e.response_time_ms?e.response_time_ms+'ms':'—'}</td><td style="font-size:.78rem;color:#f85149;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${e.error||'—'}</td></tr>`).join('')}</tbody></table>`}else{document.getElementById('sec-endpoints').innerHTML=''}
 }
 
-fetchStatus();setInterval(fetchStatus,60000);
+fetchStatus();loadHistory();setInterval(fetchStatus,60000);
+
+// ── Trend Chart ──
+let _histChart=null;
+async function loadHistory(){
+    try{
+        const r=await fetch('/api/history?limit=288');
+        const j=await r.json();const h=j.history||[];
+        if(!h.length)return;
+        const labels=h.map(p=>{const d=new Date(p.timestamp);return d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})});
+        const ctx=document.getElementById('history-chart');
+        if(!ctx)return;
+        if(_histChart)_histChart.destroy();
+        _histChart=new Chart(ctx,{type:'line',data:{labels,datasets:[
+            {label:'EC2 Running',data:h.map(p=>p.ec2_running),borderColor:'#58a6ff',backgroundColor:'rgba(88,166,255,.1)',fill:true,tension:.3,pointRadius:0},
+            {label:'EC2 Healthy',data:h.map(p=>p.ec2_healthy),borderColor:'#3fb950',backgroundColor:'rgba(63,185,80,.1)',fill:true,tension:.3,pointRadius:0},
+            {label:'Avg CPU %',data:h.map(p=>p.avg_cpu),borderColor:'#d29922',tension:.3,pointRadius:0,yAxisID:'y1'}
+        ]},options:{responsive:true,interaction:{intersect:false,mode:'index'},
+            plugins:{legend:{labels:{color:'#8b949e',font:{size:10}}}},
+            scales:{x:{ticks:{color:'#484f58',maxTicksAutoSkip:true,maxRotation:0,font:{size:9}},grid:{color:'#21262d'}},
+                y:{ticks:{color:'#484f58'},grid:{color:'#21262d'},title:{display:true,text:'Count',color:'#8b949e',font:{size:10}}},
+                y1:{position:'right',ticks:{color:'#484f58'},grid:{display:false},title:{display:true,text:'CPU %',color:'#8b949e',font:{size:10}},min:0,max:100}
+        }}});
+    }catch(e){console.error('History load failed',e)}
+}
 </script></body></html>""")
 
 
@@ -1239,12 +1360,17 @@ def page_settings():
 
 <!-- AWS -->
 <div class="panel"><h3>AWS</h3>
-    <div class="field"><label>Region</label><select id="aws-region">
-        <option value="us-east-1">US East (Virginia)</option><option value="us-east-2">US East (Ohio)</option>
-        <option value="us-west-1">US West (California)</option><option value="us-west-2">US West (Oregon)</option>
-        <option value="eu-west-1">EU (Ireland)</option><option value="eu-west-2">EU (London)</option>
-        <option value="eu-central-1">EU (Frankfurt)</option><option value="ap-southeast-1">AP (Singapore)</option>
-        <option value="ap-northeast-1">AP (Tokyo)</option></select></div>
+    <div class="field"><label>Regions</label><div id="aws-regions" style="display:grid;grid-template-columns:1fr 1fr;gap:2px">
+        <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="us-east-1"> US East (Virginia)</label>
+        <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="us-east-2"> US East (Ohio)</label>
+        <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="us-west-1"> US West (California)</label>
+        <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="us-west-2"> US West (Oregon)</label>
+        <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="eu-west-1"> EU (Ireland)</label>
+        <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="eu-west-2"> EU (London)</label>
+        <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="eu-central-1"> EU (Frankfurt)</label>
+        <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="ap-southeast-1"> AP (Singapore)</label>
+        <label style="font-size:.82rem;padding:3px 0"><input type="checkbox" value="ap-northeast-1"> AP (Tokyo)</label>
+    </div></div>
     <div class="field"><label>Access Key</label><input type="text" id="aws-key" placeholder="AKIA..."><div class="hint">Blank = use instance role / ~/.aws/credentials</div></div>
     <div class="field"><label>Secret Key</label><input type="password" id="aws-secret"></div>
 </div>
@@ -1332,6 +1458,14 @@ def page_settings():
     <div class="field" style="margin-top:8px"><label>Summary Hour (0-23)</label><input type="number" id="n-hr" min="0" max="23" value="9" style="width:70px"></div>
 </div>
 
+<!-- Security -->
+<div class="panel"><h3>Security</h3>
+    <div class="field"><label>Username</label><input type="text" id="auth-user" value="admin"></div>
+    <div class="field"><label>New Password</label><input type="password" id="auth-pass" placeholder="Leave blank to keep current"></div>
+    <div class="field"><label>Confirm Password</label><input type="password" id="auth-pass2" placeholder="Leave blank to keep current"></div>
+    <div class="hint">Set a password to enable login. Leave blank to keep current or disable auth.</div>
+</div>
+
 </div>
 
 <!-- Action Bar -->
@@ -1354,7 +1488,8 @@ function toggleSmtp(){document.getElementById('smtp-f').style.display=document.g
 async function loadCfg(){
     const c=await(await fetch('/api/config')).json();
     // AWS
-    document.getElementById('aws-region').value=c.aws.region;
+    const regions=c.aws.regions||[c.aws.region];
+    document.querySelectorAll('#aws-regions input[type=checkbox]').forEach(cb=>{cb.checked=regions.includes(cb.value)});
     document.getElementById('aws-key').value=c.aws.access_key_id;
     document.getElementById('aws-secret').value=c.aws.secret_access_key;
     // Monitoring
@@ -1419,10 +1554,17 @@ async function loadCfg(){
     document.getElementById('n-med').checked=c.notifications.on_media_issues;
     document.getElementById('n-daily').checked=c.notifications.send_daily_summary;
     document.getElementById('n-hr').value=c.notifications.daily_summary_hour;
+    // Auth
+    const auth=c.auth||{};
+    document.getElementById('auth-user').value=auth.username||'admin';
 }
 
-function gather(){return{
-    aws:{region:document.getElementById('aws-region').value,access_key_id:document.getElementById('aws-key').value,secret_access_key:document.getElementById('aws-secret').value},
+function gather(){
+    const pass1=document.getElementById('auth-pass').value;
+    const pass2=document.getElementById('auth-pass2').value;
+    if(pass1&&pass1!==pass2){toast('Passwords do not match','error');return null}
+    return{
+    aws:{regions:[...document.querySelectorAll('#aws-regions input:checked')].map(cb=>cb.value),access_key_id:document.getElementById('aws-key').value,secret_access_key:document.getElementById('aws-secret').value},
     monitoring:{
         check_interval_minutes:+document.getElementById('m-int').value,cpu_threshold:+document.getElementById('m-cpu').value,
         deployment_lookback_hours:+document.getElementById('m-dep').value,
@@ -1452,12 +1594,14 @@ function gather(){return{
                 chat_id:document.getElementById('t-cid').value,parse_mode:document.getElementById('t-pm').value},
             slack:{enabled:document.getElementById('s-on').checked,webhook_url:document.getElementById('s-url').value},
         }
-    }
+    },
+    auth:{username:document.getElementById('auth-user').value,password:pass1||''}
 }}
 
 async function save(){
+    const data=gather();if(!data)return;
     const b=document.getElementById('bt-s');b.disabled=true;b.textContent='Saving...';
-    try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(gather())});
+    try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
         const j=await r.json();toast(j.status==='ok'?'Saved!':'Save failed',j.status==='ok'?'success':'error')
     }catch(e){toast('Error: '+e.message,'error')}
     b.disabled=false;b.textContent='Save Settings';
@@ -1478,14 +1622,17 @@ loadCfg();
 
 # ─── Scheduler ───────────────────────────────────────────────────────────────
 
+_scheduler = None
+
 def start_scheduler():
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(scheduled_check, "interval", minutes=5)
-    # Daily summary — runs every hour, checks if it's the configured hour
+    global _scheduler
     config = load_config()
+    _scheduler = BackgroundScheduler()
+    interval = max(1, config.get("monitoring", {}).get("check_interval_minutes", 5))
+    _scheduler.add_job(scheduled_check, "interval", minutes=interval, id="main_check", replace_existing=True)
     summary_hour = config.get("notifications", {}).get("daily_summary_hour", 9)
-    scheduler.add_job(send_daily_summary, "cron", hour=summary_hour, minute=0)
-    scheduler.start()
+    _scheduler.add_job(send_daily_summary, "cron", hour=summary_hour, minute=0, id="daily_summary", replace_existing=True)
+    _scheduler.start()
     try:
         scheduled_check()
     except Exception as e:

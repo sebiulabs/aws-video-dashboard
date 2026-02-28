@@ -45,6 +45,7 @@ class InstanceStatus:
     cpu_utilization: Optional[float] = None
     uptime_hours: Optional[float] = None
     uptime_display: str = ""
+    region: str = ""
     alerts: list = field(default_factory=list)
 
     @property
@@ -86,12 +87,13 @@ class DeploymentStatus:
     create_time: str
     complete_time: Optional[str] = None
     error_info: Optional[str] = None
+    region: str = ""
 
 
 # ─── AWS Clients ─────────────────────────────────────────────────────────────
 
-def _get_boto_kwargs(config: dict) -> dict:
-    kwargs = {"region_name": config["aws"]["region"]}
+def _get_boto_kwargs(config: dict, region: str = None) -> dict:
+    kwargs = {"region_name": region or config["aws"]["region"]}
     if config["aws"]["access_key_id"] and config["aws"]["secret_access_key"]:
         kwargs["aws_access_key_id"] = config["aws"]["access_key_id"]
         kwargs["aws_secret_access_key"] = config["aws"]["secret_access_key"]
@@ -107,8 +109,8 @@ def get_instance_name(instance: dict) -> str:
     return "(no name)"
 
 
-def get_cpu_utilization(config, instance_id: str, minutes: int = 10) -> Optional[float]:
-    cw = boto3.client("cloudwatch", **_get_boto_kwargs(config))
+def get_cpu_utilization(config, instance_id: str, minutes: int = 10, region: str = None) -> Optional[float]:
+    cw = boto3.client("cloudwatch", **_get_boto_kwargs(config, region))
     try:
         response = cw.get_metric_statistics(
             Namespace="AWS/EC2", MetricName="CPUUtilization",
@@ -124,8 +126,8 @@ def get_cpu_utilization(config, instance_id: str, minutes: int = 10) -> Optional
     return None
 
 
-def check_ec2_instances(config) -> list[InstanceStatus]:
-    ec2 = boto3.client("ec2", **_get_boto_kwargs(config))
+def check_ec2_instances(config, region: str = None) -> list[InstanceStatus]:
+    ec2 = boto3.client("ec2", **_get_boto_kwargs(config, region))
     instances = []
     cpu_threshold = config["monitoring"]["cpu_threshold"]
 
@@ -162,7 +164,7 @@ def check_ec2_instances(config) -> list[InstanceStatus]:
         iid = inst["InstanceId"]
         state = inst["State"]["Name"]
         sc = status_map.get(iid, "unknown")
-        cpu = get_cpu_utilization(config, iid) if state == "running" else None
+        cpu = get_cpu_utilization(config, iid, region=region) if state == "running" else None
 
         # Calculate uptime for running instances
         uptime_hours, uptime_display = (None, "")
@@ -187,6 +189,7 @@ def check_ec2_instances(config) -> list[InstanceStatus]:
             launch_time=inst.get("LaunchTime", "").isoformat() if inst.get("LaunchTime") else "",
             status_checks=sc, cpu_utilization=cpu,
             uptime_hours=uptime_hours, uptime_display=uptime_display,
+            region=region or config["aws"]["region"],
             alerts=alerts,
         ))
     return instances
@@ -194,8 +197,8 @@ def check_ec2_instances(config) -> list[InstanceStatus]:
 
 # ─── CodeDeploy ──────────────────────────────────────────────────────────────
 
-def check_deployments(config, hours: int = 24) -> list[DeploymentStatus]:
-    cd = boto3.client("codedeploy", **_get_boto_kwargs(config))
+def check_deployments(config, hours: int = 24, region: str = None) -> list[DeploymentStatus]:
+    cd = boto3.client("codedeploy", **_get_boto_kwargs(config, region))
     deployments = []
     try:
         apps = cd.list_applications().get("applications", [])
@@ -218,6 +221,7 @@ def check_deployments(config, hours: int = 24) -> list[DeploymentStatus]:
                         create_time=info.get("createTime", "").isoformat() if info.get("createTime") else "",
                         complete_time=info.get("completeTime", "").isoformat() if info.get("completeTime") else None,
                         error_info=error,
+                        region=region or config["aws"]["region"],
                     ))
     except ClientError as e:
         logger.warning(f"CodeDeploy check failed: {e}")
@@ -226,8 +230,8 @@ def check_deployments(config, hours: int = 24) -> list[DeploymentStatus]:
 
 # ─── ECS ─────────────────────────────────────────────────────────────────────
 
-def check_ecs_services(config) -> list[dict]:
-    ecs = boto3.client("ecs", **_get_boto_kwargs(config))
+def check_ecs_services(config, region: str = None) -> list[dict]:
+    ecs = boto3.client("ecs", **_get_boto_kwargs(config, region))
     services = []
     try:
         clusters = ecs.list_clusters().get("clusterArns", [])
@@ -246,6 +250,7 @@ def check_ecs_services(config) -> list[dict]:
                     "pending": svc.get("pendingCount", 0),
                     "status": svc.get("status", "unknown"),
                     "healthy": healthy,
+                    "region": region or config["aws"]["region"],
                 })
     except ClientError as e:
         logger.warning(f"ECS check failed: {e}")
@@ -454,28 +459,60 @@ def generate_summary(instances, deployments, ecs_services, media_data=None) -> d
     return summary
 
 
+def _merge_media(media_data, key, new_data, list_key):
+    """Merge media service results from multiple regions."""
+    if key not in media_data:
+        media_data[key] = new_data
+        return
+    existing = media_data[key]
+    existing[list_key].extend(new_data.get(list_key, []))
+    for k in ("total", "running", "healthy", "live"):
+        if k in new_data:
+            existing[k] = existing.get(k, 0) + new_data[k]
+
+
 def run_check(send_alerts: bool = True) -> dict:
     config = load_config()
     mon = config["monitoring"]
-    logger.info("Running AWS health check...")
+    regions = config["aws"].get("regions", [config["aws"]["region"]])
+    logger.info(f"Running AWS health check across {len(regions)} region(s)...")
 
-    # Core infrastructure
-    instances = check_ec2_instances(config) if mon["monitor_ec2"] else []
-    deployments = check_deployments(config, hours=mon["deployment_lookback_hours"]) if mon["monitor_codedeploy"] else []
-    ecs_services = check_ecs_services(config) if mon["monitor_ecs"] else []
-
-    # Video engineering services
+    all_instances = []
+    all_deployments = []
+    all_ecs_services = []
     media_data = {}
-    if mon.get("monitor_medialive"):
-        media_data["medialive"] = check_medialive(config)
-    if mon.get("monitor_mediaconnect"):
-        media_data["mediaconnect"] = check_mediaconnect(config)
-    if mon.get("monitor_mediapackage"):
-        media_data["mediapackage"] = check_mediapackage(config)
-    if mon.get("monitor_cloudfront"):
-        media_data["cloudfront"] = check_cloudfront(config)
-    if mon.get("monitor_ivs"):
-        media_data["ivs"] = check_ivs(config)
+
+    for region in regions:
+        if mon["monitor_ec2"]:
+            all_instances.extend(check_ec2_instances(config, region=region))
+        if mon["monitor_codedeploy"]:
+            all_deployments.extend(check_deployments(config, hours=mon["deployment_lookback_hours"], region=region))
+        if mon["monitor_ecs"]:
+            all_ecs_services.extend(check_ecs_services(config, region=region))
+        if mon.get("monitor_medialive"):
+            ml = check_medialive(config, region=region)
+            for ch in ml.get("channels", []): ch["region"] = region
+            _merge_media(media_data, "medialive", ml, "channels")
+        if mon.get("monitor_mediaconnect"):
+            mc = check_mediaconnect(config, region=region)
+            for f in mc.get("flows", []): f["region"] = region
+            _merge_media(media_data, "mediaconnect", mc, "flows")
+        if mon.get("monitor_mediapackage"):
+            mp = check_mediapackage(config, region=region)
+            for ch in mp.get("channels", []): ch["region"] = region
+            _merge_media(media_data, "mediapackage", mp, "channels")
+        if mon.get("monitor_cloudfront"):
+            cf = check_cloudfront(config, region=region)
+            for d in cf.get("distributions", []): d["region"] = region
+            _merge_media(media_data, "cloudfront", cf, "distributions")
+        if mon.get("monitor_ivs"):
+            ivs = check_ivs(config, region=region)
+            for ch in ivs.get("channels", []): ch["region"] = region
+            _merge_media(media_data, "ivs", ivs, "channels")
+
+    instances = all_instances
+    deployments = all_deployments
+    ecs_services = all_ecs_services
 
     summary = generate_summary(instances, deployments, ecs_services, media_data)
 

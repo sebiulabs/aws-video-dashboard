@@ -25,6 +25,7 @@ Thumbs.db
 
 # App runtime
 gunicorn.ctl
+history.db
 *.log
 *.pid
 

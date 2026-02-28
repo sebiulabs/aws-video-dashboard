@@ -16,6 +16,7 @@ CONFIG_PATH = os.getenv("CONFIG_PATH", os.path.join(os.path.dirname(__file__), "
 DEFAULT_CONFIG = {
     "aws": {
         "region": "eu-west-2",
+        "regions": ["eu-west-2"],
         "access_key_id": "",
         "secret_access_key": "",
     },
@@ -38,6 +39,10 @@ DEFAULT_CONFIG = {
         "model": "anthropic/claude-sonnet-4.6",
         "max_tokens": 2048,
         "temperature": 0.3,
+    },
+    "auth": {
+        "username": "admin",
+        "password_hash": "",
     },
     "alert_rules": [],
     "endpoints": [],
@@ -99,10 +104,20 @@ def load_config() -> dict:
         try:
             with open(CONFIG_PATH, "r") as f:
                 saved = json.load(f)
-            return _deep_merge(DEFAULT_CONFIG, saved)
+            config = _deep_merge(DEFAULT_CONFIG, saved)
         except (json.JSONDecodeError, IOError) as e:
             logger.error(f"Failed to load config: {e}")
-    return json.loads(json.dumps(DEFAULT_CONFIG))
+            config = json.loads(json.dumps(DEFAULT_CONFIG))
+    else:
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
+
+    # Migrate single region to regions list
+    aws = config.get("aws", {})
+    if "regions" not in aws and "region" in aws:
+        aws["regions"] = [aws["region"]]
+    if aws.get("regions"):
+        aws["region"] = aws["regions"][0]
+    return config
 
 
 def save_config(config: dict) -> bool:
@@ -156,6 +171,10 @@ def get_masked_config() -> dict:
     sl = c["notifications"]["channels"].get("slack", {})
     if sl.get("webhook_url"):
         sl["webhook_url"] = mask(sl["webhook_url"])
+
+    # Auth
+    if c.get("auth", {}).get("password_hash"):
+        c["auth"]["password_hash"] = "••••••••"
 
     # AI
     if c.get("ai", {}).get("openrouter_api_key"):
