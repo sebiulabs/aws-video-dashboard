@@ -20,6 +20,7 @@ from config_manager import load_config, save_config, update_config, get_masked_c
 from monitor import run_check, send_whatsapp, send_notifications
 from email_notifier import send_email
 from telegram_notifier import send_telegram
+from slack_notifier import send_slack
 from openrouter_ai import query_openrouter, get_available_models
 from alert_rules import (
     get_rules, add_rule, update_rule, delete_rule, add_template,
@@ -114,6 +115,10 @@ def api_test_email():
 @app.route("/api/test/telegram", methods=["POST"])
 def api_test_telegram():
     return jsonify({"sent": send_telegram("Test — Telegram is working!", load_config())})
+
+@app.route("/api/test/slack", methods=["POST"])
+def api_test_slack():
+    return jsonify({"sent": send_slack("Test — Slack is working!", load_config())})
 
 
 # ─── Alert Rules API ────────────────────────────────────────────────────────
@@ -1299,6 +1304,12 @@ def page_settings():
     <div class="field"><label>Parse Mode</label><select id="t-pm"><option value="HTML">HTML</option><option value="Markdown">Markdown</option></select></div>
 </div>
 
+<!-- Slack -->
+<div class="panel"><h3>Slack</h3>
+    <div class="toggle-row" style="margin-bottom:10px"><span style="font-size:.85rem">Enable Slack</span><label class="switch"><input type="checkbox" id="s-on"><span class="slider"></span></label></div>
+    <div class="field"><label>Webhook URL</label><input type="password" id="s-url" placeholder="https://hooks.slack.com/services/..."><div class="hint">Slack App → Incoming Webhooks → Add to channel → Copy URL</div></div>
+</div>
+
 <!-- AI Assistant -->
 <div class="panel"><h3>AI Assistant (OpenRouter)</h3>
     <div class="field"><label>API Key</label><input type="password" id="ai-key" placeholder="sk-or-...">
@@ -1329,6 +1340,7 @@ def page_settings():
         <button class="btn" onclick="testN('email')" id="bt-e">Test Email</button>
         <button class="btn" onclick="testN('whatsapp')" id="bt-w">Test WhatsApp</button>
         <button class="btn" onclick="testN('telegram')" id="bt-t">Test Telegram</button>
+        <button class="btn" onclick="testN('slack')" id="bt-s2">Test Slack</button>
     </div>
     <button class="btn p" onclick="save()" id="bt-s" style="font-size:.95rem;padding:9px 24px">Save Settings</button>
 </div>
@@ -1383,6 +1395,10 @@ async function loadCfg(){
     document.getElementById('t-tok').value=tg.bot_token||'';
     document.getElementById('t-cid').value=tg.chat_id||'';
     document.getElementById('t-pm').value=tg.parse_mode||'HTML';
+    // Slack
+    const sl=c.notifications.channels.slack||{};
+    document.getElementById('s-on').checked=sl.enabled||false;
+    document.getElementById('s-url').value=sl.webhook_url||'';
     // AI
     const ai=c.ai||{};
     document.getElementById('ai-key').value=ai.openrouter_api_key||'';
@@ -1434,6 +1450,7 @@ function gather(){return{
                 to_number:document.getElementById('w-to').value},
             telegram:{enabled:document.getElementById('t-on').checked,bot_token:document.getElementById('t-tok').value,
                 chat_id:document.getElementById('t-cid').value,parse_mode:document.getElementById('t-pm').value},
+            slack:{enabled:document.getElementById('s-on').checked,webhook_url:document.getElementById('s-url').value},
         }
     }
 }}
@@ -1447,7 +1464,7 @@ async function save(){
 }
 
 async function testN(ch){
-    const btn=document.getElementById({email:'bt-e',whatsapp:'bt-w',telegram:'bt-t'}[ch]);
+    const btn=document.getElementById({email:'bt-e',whatsapp:'bt-w',telegram:'bt-t',slack:'bt-s2'}[ch]);
     btn.disabled=true;
     try{const r=await fetch('/api/test/'+ch,{method:'POST'});const j=await r.json();
         toast(j.sent?ch+' test sent!':ch+' failed — check settings',j.sent?'success':'error')

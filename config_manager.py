@@ -76,6 +76,10 @@ DEFAULT_CONFIG = {
                 "chat_id": "",
                 "parse_mode": "HTML",
             },
+            "slack": {
+                "enabled": False,
+                "webhook_url": "",
+            },
         },
     },
 }
@@ -149,6 +153,10 @@ def get_masked_config() -> dict:
     tg = c["notifications"]["channels"]["telegram"]
     if tg["bot_token"]:
         tg["bot_token"] = mask(tg["bot_token"])
+
+    sl = c["notifications"]["channels"].get("slack", {})
+    if sl.get("webhook_url"):
+        sl["webhook_url"] = mask(sl["webhook_url"])
 
     # AI
     if c.get("ai", {}).get("openrouter_api_key"):

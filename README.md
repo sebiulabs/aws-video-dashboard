@@ -11,7 +11,7 @@ Monitor EC2 instances, AWS Media Services (MediaLive, MediaConnect, MediaPackage
 - **Alert Rules** — Custom threshold-based alerts with templates for common scenarios
 - **Endpoint Monitoring** — HTTP/TCP/UDP health checks for any service
 - **AI Assistant** — Natural language infrastructure queries powered by OpenRouter (Claude, GPT, Gemini, and more)
-- **Multi-channel Notifications** — Email (SMTP/SES), WhatsApp (Twilio), Telegram
+- **Multi-channel Notifications** — Email (SMTP/SES), Slack, WhatsApp (Twilio), Telegram
 - **Uptime Alerts** — Get notified when EC2 instances run longer than expected (prevent cost overruns)
 
 ## Quick Start
@@ -65,6 +65,7 @@ config_manager.py   — JSON config persistence
 openrouter_ai.py    — AI assistant via OpenRouter
 email_notifier.py   — Email notifications (SMTP/SES)
 telegram_notifier.py — Telegram bot notifications
+slack_notifier.py   — Slack incoming webhook notifications
 ```
 
 ## Designed For

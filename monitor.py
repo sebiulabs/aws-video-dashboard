@@ -17,6 +17,7 @@ from botocore.exceptions import ClientError
 from config_manager import load_config
 from email_notifier import send_email
 from telegram_notifier import send_telegram
+from slack_notifier import send_slack
 from video_monitor import (
     check_medialive, check_mediaconnect, check_mediapackage,
     check_cloudfront, check_ivs,
@@ -285,6 +286,8 @@ def send_to_channels(subject: str, body: str, config: dict, channels: Optional[l
         results["email"] = send_email(subject, body, config)
     if "telegram" in target:
         results["telegram"] = send_telegram(body, config)
+    if "slack" in target:
+        results["slack"] = send_slack(body, config)
 
     return results
 
