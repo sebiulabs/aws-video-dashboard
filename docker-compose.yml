@@ -1,0 +1,13 @@
+services:
+  dashboard:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_SECRET_KEY=${FLASK_SECRET_KEY:-change-me-to-a-random-string}
+    volumes:
+      - dashboard-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  dashboard-data:
