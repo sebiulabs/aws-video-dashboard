@@ -224,9 +224,9 @@ def api_save_config():
     updated = update_config(incoming)
     # Reschedule if interval changed
     if _scheduler and "monitoring" in incoming:
-        new_interval = max(1, incoming["monitoring"].get("check_interval_minutes", 5))
+        new_interval = max(10, incoming["monitoring"].get("check_interval_seconds", 300))
         try:
-            _scheduler.reschedule_job("main_check", trigger="interval", minutes=new_interval)
+            _scheduler.reschedule_job("main_check", trigger="interval", seconds=new_interval)
         except Exception:
             pass
     return jsonify({"status": "ok", "config": get_masked_config()})
@@ -1430,7 +1430,17 @@ def page_settings():
 <!-- Monitoring -->
 <div class="panel"><h3>Monitoring</h3>
     <div class="grid2">
-        <div class="field"><label>Check Interval (min)</label><input type="number" id="m-int" min="1" max="60" value="5"></div>
+        <div class="field"><label>Check Interval</label><select id="m-int">
+            <option value="10">10 seconds</option>
+            <option value="30">30 seconds</option>
+            <option value="60">1 minute</option>
+            <option value="120">2 minutes</option>
+            <option value="300" selected>5 minutes (default)</option>
+            <option value="600">10 minutes</option>
+            <option value="900">15 minutes</option>
+            <option value="1800">30 minutes</option>
+            <option value="3600">60 minutes</option>
+        </select></div>
         <div class="field"><label>CPU Threshold (%)</label><input type="number" id="m-cpu" min="1" max="100" value="80"></div>
     </div>
     <div class="field"><label>Deploy Lookback (hrs)</label><input type="number" id="m-dep" min="1" max="168" value="24"></div>
@@ -1545,7 +1555,7 @@ async function loadCfg(){
     document.getElementById('aws-key').value=c.aws.access_key_id;
     document.getElementById('aws-secret').value=c.aws.secret_access_key;
     // Monitoring
-    document.getElementById('m-int').value=c.monitoring.check_interval_minutes;
+    document.getElementById('m-int').value=c.monitoring.check_interval_seconds;
     document.getElementById('m-cpu').value=c.monitoring.cpu_threshold;
     document.getElementById('m-dep').value=c.monitoring.deployment_lookback_hours;
     document.getElementById('m-uptime').value=c.monitoring.uptime_alert_hours||0;
@@ -1618,7 +1628,7 @@ function gather(){
     return{
     aws:{regions:[...document.querySelectorAll('#aws-regions input:checked')].map(cb=>cb.value),access_key_id:document.getElementById('aws-key').value,secret_access_key:document.getElementById('aws-secret').value},
     monitoring:{
-        check_interval_minutes:+document.getElementById('m-int').value,cpu_threshold:+document.getElementById('m-cpu').value,
+        check_interval_seconds:+document.getElementById('m-int').value,cpu_threshold:+document.getElementById('m-cpu').value,
         deployment_lookback_hours:+document.getElementById('m-dep').value,
         uptime_alert_hours:+document.getElementById('m-uptime').value,
         monitor_ec2:document.getElementById('m-ec2').checked,monitor_codedeploy:document.getElementById('m-cd').checked,
@@ -1680,8 +1690,8 @@ def start_scheduler():
     global _scheduler
     config = load_config()
     _scheduler = BackgroundScheduler()
-    interval = max(1, config.get("monitoring", {}).get("check_interval_minutes", 5))
-    _scheduler.add_job(scheduled_check, "interval", minutes=interval, id="main_check", replace_existing=True)
+    interval = max(10, config.get("monitoring", {}).get("check_interval_seconds", 300))
+    _scheduler.add_job(scheduled_check, "interval", seconds=interval, id="main_check", replace_existing=True)
     summary_hour = config.get("notifications", {}).get("daily_summary_hour", 9)
     _scheduler.add_job(send_daily_summary, "cron", hour=summary_hour, minute=0, id="daily_summary", replace_existing=True)
     _scheduler.start()

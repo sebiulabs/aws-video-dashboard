@@ -21,7 +21,7 @@ DEFAULT_CONFIG = {
         "secret_access_key": "",
     },
     "monitoring": {
-        "check_interval_minutes": 5,
+        "check_interval_seconds": 300,
         "cpu_threshold": 80.0,
         "deployment_lookback_hours": 24,
         "uptime_alert_hours": 24,

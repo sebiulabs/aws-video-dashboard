@@ -25,7 +25,7 @@ Everything is configured from the web UI. No YAML files, no Terraform, no config
 | **AI Assistant** | Ask questions about your infrastructure (OpenRouter) |
 | **Notifications** | Email (SMTP/SES), Slack, WhatsApp, Telegram |
 | **Authentication** | Password login with rate limiting |
-| **Configurable Interval** | 1-60 minute check frequency from the UI |
+| **Configurable Interval** | 10 seconds to 60 minutes, adjustable from the UI |
 
 ---
 
@@ -230,7 +230,7 @@ Everything is configured through the web UI at `/settings`. No files to edit.
 | **AWS Credentials** | Access key, secret key (or use IAM role) |
 | **Regions** | Tick the regions you want to monitor |
 | **Services** | Toggle EC2, ECS, MediaLive, CloudFront, etc. |
-| **Check Interval** | How often to poll AWS (default: 5 min) |
+| **Check Interval** | How often to poll AWS (default: 5 min, minimum 10s) |
 | **Notifications** | Email, Slack, WhatsApp, Telegram |
 | **Alert Thresholds** | CPU %, uptime hours |
 | **AI Assistant** | OpenRouter API key + model |
