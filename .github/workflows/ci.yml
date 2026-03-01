@@ -9,6 +9,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
@@ -27,7 +29,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Syntax check — all Python files compile
-        run: python -m py_compile app.py monitor.py video_monitor.py config_manager.py easy_monitor.py alert_rules.py openrouter_ai.py email_notifier.py telegram_notifier.py slack_notifier.py history_db.py
+        run: python -m py_compile app.py monitor.py video_monitor.py config_manager.py easy_monitor.py alert_rules.py openrouter_ai.py email_notifier.py telegram_notifier.py slack_notifier.py discord_notifier.py teams_notifier.py history_db.py ec2_manager.py cloud_provisioning.py ai_actions.py incident_manager.py aws_services_monitor.py log_viewer.py cost_dashboard.py remediation.py schedule_manager.py user_manager.py gcp_manager.py
 
       - name: Import check — all modules importable
         run: |
@@ -38,9 +40,22 @@ jobs:
           python -c "import email_notifier; print('email_notifier OK')"
           python -c "import telegram_notifier; print('telegram_notifier OK')"
           python -c "import slack_notifier; print('slack_notifier OK')"
+          python -c "import discord_notifier; print('discord_notifier OK')"
+          python -c "import teams_notifier; print('teams_notifier OK')"
           python -c "import openrouter_ai; print('openrouter_ai OK')"
           python -c "import video_monitor; print('video_monitor OK')"
           python -c "import monitor; print('monitor OK')"
+          python -c "import ec2_manager; print('ec2_manager OK')"
+          python -c "import cloud_provisioning; print('cloud_provisioning OK')"
+          python -c "import ai_actions; print('ai_actions OK')"
+          python -c "import incident_manager; print('incident_manager OK')"
+          python -c "import aws_services_monitor; print('aws_services_monitor OK')"
+          python -c "import log_viewer; print('log_viewer OK')"
+          python -c "import cost_dashboard; print('cost_dashboard OK')"
+          python -c "import remediation; print('remediation OK')"
+          python -c "import schedule_manager; print('schedule_manager OK')"
+          python -c "import user_manager; print('user_manager OK')"
+          python -c "import gcp_manager; print('gcp_manager OK')"
 
       - name: Config manager tests
         run: |
@@ -69,11 +84,11 @@ jobs:
           assert perms == '600', f'Config permissions should be 600, got {perms}'
           print('permissions OK')
 
-          # Test masking — should show only last 4 chars
+          # Test masking — should fully mask secrets
           masked = get_masked_config()
-          assert masked['aws']['secret_access_key'].endswith('EKEY'), 'Masking last 4 failed'
-          assert masked['aws']['secret_access_key'].startswith('••'), 'Masking prefix failed'
-          assert 'wJal' not in masked['aws']['secret_access_key'], 'First chars should not be visible'
+          assert masked['aws']['secret_access_key'] == '••••••••', f'Secret should be fully masked, got {masked["aws"]["secret_access_key"]}'
+          assert 'wJal' not in masked['aws']['secret_access_key'], 'Secret chars should not be visible'
+          assert 'EKEY' not in masked['aws']['secret_access_key'], 'Last chars should not be visible'
           print('masking OK')
 
           # Test update
@@ -180,9 +195,20 @@ jobs:
           assert client.get('/').status_code == 200, 'Dashboard failed'
           assert client.get('/monitors').status_code == 200, 'Monitors failed'
           assert client.get('/alerts').status_code == 200, 'Alerts failed'
+          assert client.get('/incidents').status_code == 200, 'Incidents failed'
           assert client.get('/ai').status_code == 200, 'AI page failed'
           assert client.get('/settings').status_code == 200, 'Settings failed'
+          assert client.get('/cloud').status_code == 200, 'Cloud failed'
+          assert client.get('/logs').status_code == 200, 'Logs failed'
+          assert client.get('/costs').status_code == 200, 'Costs failed'
+          assert client.get('/schedules').status_code == 200, 'Schedules failed'
           print('All pages load OK')
+
+          # Health endpoint (unauthenticated)
+          r = client.get('/health')
+          assert r.status_code == 200, 'Health endpoint failed'
+          assert r.get_json()['status'] == 'ok', 'Health should return ok'
+          print('Health endpoint OK')
 
           # API status
           r = client.get('/api/status')
@@ -201,6 +227,16 @@ jobs:
           assert r.status_code == 400, f'CSRF should block non-JSON POST, got {r.status_code}'
           print('CSRF protection OK')
 
+          # CSRF check — PUT without JSON content-type should also fail
+          r = client.put('/api/rules/test', data='{}')
+          assert r.status_code == 400, f'CSRF should block non-JSON PUT, got {r.status_code}'
+          print('CSRF on PUT OK')
+
+          # CSRF check — DELETE without JSON content-type should fail
+          r = client.delete('/api/endpoints/test', data='{}')
+          assert r.status_code == 400, f'CSRF should block non-JSON DELETE, got {r.status_code}'
+          print('CSRF on DELETE OK')
+
           # History API
           r = client.get('/api/history?limit=10')
           assert r.status_code == 200, 'History API failed'
@@ -211,5 +247,48 @@ jobs:
           assert r.status_code == 200, 'Negative limit should not crash'
           print('Negative limit OK')
 
+          # Agent start API (Origin header required by CSRF check)
+          r = client.post('/api/ai/agent/start', json={'message': 'test'}, content_type='application/json', headers={'Origin': 'http://localhost'})
+          assert r.status_code == 200, f'Agent start failed: {r.status_code}'
+          data = r.get_json()
+          assert data.get('ok') and data.get('task_id'), 'Agent start should return task_id'
+          print('Agent start API OK')
+
+          # Agent stop API
+          tid = data['task_id']
+          r = client.post(f'/api/ai/agent/{tid}/stop', json={}, content_type='application/json', headers={'Origin': 'http://localhost'})
+          assert r.status_code == 200, 'Agent stop failed'
+          print('Agent stop API OK')
+
+          # Schedules API
+          r = client.get('/api/schedules')
+          assert r.status_code == 200, 'Schedules API failed'
+          print('Schedules API OK')
+
+          # Schedule stats API
+          r = client.get('/api/schedules/stats')
+          assert r.status_code == 200, 'Schedule stats API failed'
+          print('Schedule stats API OK')
+
+          # Remediation presets API
+          r = client.get('/api/remediation/presets')
+          assert r.status_code == 200, 'Remediation presets API failed'
+          print('Remediation presets API OK')
+
+          # Users API
+          r = client.get('/api/users')
+          assert r.status_code == 200, 'Users API failed'
+          print('Users API OK')
+
+          # GCP templates API
+          r = client.get('/api/cloud/gcp/templates')
+          assert r.status_code == 200, 'GCP templates API failed'
+          print('GCP templates API OK')
+
           print('All smoke tests passed')
           "
+
+      - name: Run pytest suite
+        run: |
+          pip install pytest
+          python -m pytest tests/ -v --tb=short
