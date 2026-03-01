@@ -8,6 +8,7 @@ Supports two providers:
 
 import logging
 import smtplib
+import ssl
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Optional
@@ -88,35 +89,43 @@ def send_email_smtp(subject: str, body: str, config: Optional[dict] = None) -> b
         logger.warning("SMTP not configured — skipping email")
         return False
 
-    try:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = from_addr or username
-        msg["To"] = ", ".join(to_addrs)
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = from_addr or username
+    msg["To"] = ", ".join(to_addrs)
 
-        # Plain text part
-        msg.attach(MIMEText(body, "plain"))
-        # HTML part
-        msg.attach(MIMEText(_build_html_email(subject, body), "html"))
+    # Plain text part
+    msg.attach(MIMEText(body, "plain"))
+    # HTML part
+    msg.attach(MIMEText(_build_html_email(subject, body), "html"))
+
+    server = None
+    try:
+        ctx = ssl.create_default_context()
 
         if use_tls:
-            server = smtplib.SMTP(host, port)
-            server.starttls()
+            if port == 465:
+                server = smtplib.SMTP_SSL(host, port, context=ctx)
+            else:
+                server = smtplib.SMTP(host, port)
+                server.starttls(context=ctx)
         else:
             server = smtplib.SMTP(host, port)
 
         if username and password:
             server.login(username, password)
-
         server.sendmail(from_addr or username, to_addrs, msg.as_string())
-        server.quit()
-
         logger.info(f"Email sent to {to_addrs}")
         return True
-
     except Exception as e:
         logger.error(f"SMTP send failed: {e}")
         return False
+    finally:
+        if server:
+            try:
+                server.quit()
+            except Exception:
+                pass
 
 
 # ─── AWS SES Sender ─────────────────────────────────────────────────────────

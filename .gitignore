@@ -30,7 +30,13 @@ Thumbs.db
 # App runtime
 gunicorn.ctl
 history.db
+incidents.db
+schedules.db
+remediation.db
+users.db
+easy_monitor.json
 .flask_secret
+audit.log
 *.log
 *.pid
 

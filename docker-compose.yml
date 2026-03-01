@@ -4,7 +4,8 @@ services:
     ports:
       - "5000:5000"
     environment:
-      - FLASK_SECRET_KEY=${FLASK_SECRET_KEY:-change-me-to-a-random-string}
+      - FLASK_SECRET_KEY=${FLASK_SECRET_KEY:?Set FLASK_SECRET_KEY to a random secret string}
+      - DATA_DIR=/app/data
     volumes:
       - dashboard-data:/app/data
     restart: unless-stopped

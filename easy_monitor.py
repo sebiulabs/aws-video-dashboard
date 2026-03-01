@@ -71,6 +71,7 @@ _BLOCKED_NETWORKS = [
     ipaddress.ip_network("::1/128"),
     ipaddress.ip_network("fc00::/7"),              # IPv6 private
     ipaddress.ip_network("fe80::/10"),             # IPv6 link-local
+    ipaddress.ip_network("::ffff:0:0/96"),         # IPv4-mapped IPv6
 ]
 
 
@@ -82,6 +83,8 @@ def _is_blocked_host(hostname: str) -> bool:
         addr_info = socket.getaddrinfo(hostname, None)
         for family, _, _, _, sockaddr in addr_info:
             ip = ipaddress.ip_address(sockaddr[0])
+            if hasattr(ip, 'ipv4_mapped') and ip.ipv4_mapped:
+                ip = ip.ipv4_mapped
             for net in _BLOCKED_NETWORKS:
                 if ip in net:
                     return True
@@ -228,9 +231,14 @@ def _check_http(ep: dict) -> dict:
         "error": None,
     }
 
+    # URL scheme validation
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return {"status": "error", "response_time_ms": 0, "error": "Only http/https allowed"}
+
     # SSRF protection
     try:
-        hostname = urlparse(url).hostname or ""
+        hostname = parsed.hostname or ""
     except Exception:
         hostname = ""
     if _is_blocked_host(hostname):
@@ -285,13 +293,12 @@ def _check_tcp(ep: dict) -> dict:
         result["error"] = "Blocked: private/internal address"
         return result
 
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    start = time.monotonic()
     try:
-        start = time.monotonic()
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
         sock.connect((host, int(port)))
         elapsed = round((time.monotonic() - start) * 1000, 1)
-        sock.close()
         result["status"] = "up"
         result["response_time_ms"] = elapsed
     except socket.timeout:
@@ -302,6 +309,8 @@ def _check_tcp(ep: dict) -> dict:
         result["error"] = f"DNS lookup failed for {host}"
     except Exception as e:
         result["error"] = str(e)[:200]
+    finally:
+        sock.close()
 
     return result
 
@@ -324,21 +333,72 @@ def _resolve_json_path(data: dict, path: str):
 
 
 def _check_json_api(ep: dict) -> dict:
-    """JSON API endpoint — fetch and extract a value via json_path."""
-    http_result = _check_http(ep)  # SSRF check happens inside _check_http
-    result = {**http_result, "json_value": None, "json_path": ep.get("json_path", "")}
+    """JSON API endpoint — fetch once and extract a value via json_path."""
+    url = ep.get("url", "")
+    method = ep.get("method", "GET").upper()
+    expected = ep.get("expected_status", 200)
+    body_match = ep.get("body_contains", "")
+    timeout = ep.get("timeout_seconds", 10)
 
-    if http_result["status"] != "down" and ep.get("json_path"):
-        try:
-            url = ep.get("url", "")
-            timeout = ep.get("timeout_seconds", 10)
-            resp = requests.get(url, timeout=timeout, allow_redirects=False,
+    result = {
+        "status": "down",
+        "response_time_ms": 0,
+        "status_code": 0,
+        "body_match": None,
+        "error": None,
+        "json_value": None,
+        "json_path": ep.get("json_path", ""),
+    }
+
+    # SSRF protection
+    try:
+        hostname = urlparse(url).hostname or ""
+    except Exception:
+        hostname = ""
+    if _is_blocked_host(hostname):
+        result["error"] = "Blocked: private/internal address"
+        return result
+
+    try:
+        start = time.monotonic()
+        resp = requests.request(method, url, timeout=timeout, allow_redirects=False,
                                 headers={"User-Agent": "AWS-Dashboard-Monitor/1.0"})
-            data = resp.json()
-            value = _resolve_json_path(data, ep["json_path"])
-            result["json_value"] = value
-        except Exception as e:
-            result["error"] = f"JSON parse error: {str(e)[:100]}"
+        elapsed = round((time.monotonic() - start) * 1000, 1)
+
+        result["response_time_ms"] = elapsed
+        result["status_code"] = resp.status_code
+
+        # Status code check
+        status_ok = resp.status_code == expected
+
+        # Body match check
+        body_ok = True
+        if body_match:
+            body_ok = body_match in resp.text
+            result["body_match"] = body_ok
+
+        result["status"] = "up" if (status_ok and body_ok) else "degraded"
+        if not status_ok:
+            result["error"] = f"Expected {expected}, got {resp.status_code}"
+        elif not body_ok:
+            result["error"] = f"Body missing: '{body_match}'"
+
+        # JSON path extraction (using the same response, no second request)
+        if ep.get("json_path"):
+            try:
+                data = resp.json()
+                value = _resolve_json_path(data, ep["json_path"])
+                result["json_value"] = value
+            except Exception as e:
+                result["error"] = f"JSON parse error: {str(e)[:100]}"
+
+    except requests.Timeout:
+        result["error"] = f"Timeout ({timeout}s)"
+        result["response_time_ms"] = timeout * 1000
+    except requests.ConnectionError as e:
+        result["error"] = f"Connection failed: {str(e)[:100]}"
+    except Exception as e:
+        result["error"] = str(e)[:200]
 
     return result
 

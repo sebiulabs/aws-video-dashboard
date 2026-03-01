@@ -5,13 +5,15 @@ JSON-based config that persists to disk. The UI settings page reads/writes
 through the Flask API, so everything is configurable without touching files.
 """
 
+import copy
 import os
 import json
 import logging
 
 logger = logging.getLogger(__name__)
 
-CONFIG_PATH = os.getenv("CONFIG_PATH", os.path.join(os.path.dirname(__file__), "config.json"))
+DATA_DIR = os.environ.get("DATA_DIR", os.path.dirname(__file__))
+CONFIG_PATH = os.getenv("CONFIG_PATH", os.path.join(DATA_DIR, "config.json"))
 
 DEFAULT_CONFIG = {
     "aws": {
@@ -33,6 +35,18 @@ DEFAULT_CONFIG = {
         "monitor_mediapackage": False,
         "monitor_cloudfront": False,
         "monitor_ivs": False,
+        "monitor_rds": False,
+        "monitor_lambda": False,
+        "monitor_s3": False,
+        "monitor_sqs": False,
+        "monitor_route53": False,
+        "monitor_apigateway": False,
+        "monitor_vpc": False,
+        "monitor_elb": False,
+        "monitor_eip": False,
+        "monitor_nat": False,
+        "monitor_security_groups": False,
+        "monitor_vpn": False,
     },
     "ai": {
         "openrouter_api_key": "",
@@ -43,6 +57,16 @@ DEFAULT_CONFIG = {
     "auth": {
         "username": "admin",
         "password_hash": "",
+    },
+    "gcp": {
+        "enabled": False,
+        "project_id": "",
+        "service_account_json": "",
+        "regions": ["us-central1"],
+        "monitor_gce": True,
+        "monitor_gke": True,
+        "monitor_cloud_run": True,
+        "monitor_gcs": True,
     },
     "alert_rules": [],
     "endpoints": [],
@@ -84,13 +108,22 @@ DEFAULT_CONFIG = {
                 "enabled": False,
                 "webhook_url": "",
             },
+            "discord": {
+                "enabled": False,
+                "webhook_url": "",
+                "username": "AWS Dashboard",
+            },
+            "teams": {
+                "enabled": False,
+                "webhook_url": "",
+            },
         },
     },
 }
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
-    result = base.copy()
+    result = copy.deepcopy(base)
     for key, value in override.items():
         if key in result and isinstance(result[key], dict) and isinstance(value, dict):
             result[key] = _deep_merge(result[key], value)
@@ -144,9 +177,7 @@ def get_masked_config() -> dict:
     def mask(val: str) -> str:
         if not val:
             return ""
-        if len(val) <= 4:
-            return "••••"
-        return "••••••••" + val[-4:]
+        return "••••••••"
 
     c = json.loads(json.dumps(config))
 
@@ -175,6 +206,14 @@ def get_masked_config() -> dict:
     if sl.get("webhook_url"):
         sl["webhook_url"] = mask(sl["webhook_url"])
 
+    dc = c["notifications"]["channels"].get("discord", {})
+    if dc.get("webhook_url"):
+        dc["webhook_url"] = mask(dc["webhook_url"])
+
+    tm = c["notifications"]["channels"].get("teams", {})
+    if tm.get("webhook_url"):
+        tm["webhook_url"] = mask(tm["webhook_url"])
+
     # Auth
     if c.get("auth", {}).get("password_hash"):
         c["auth"]["password_hash"] = "••••••••"
@@ -182,5 +221,9 @@ def get_masked_config() -> dict:
     # AI
     if c.get("ai", {}).get("openrouter_api_key"):
         c["ai"]["openrouter_api_key"] = mask(c["ai"]["openrouter_api_key"])
+
+    # GCP
+    if c.get("gcp", {}).get("service_account_json"):
+        c["gcp"]["service_account_json"] = "••••••••"
 
     return c

@@ -87,6 +87,56 @@ SERVICE_METRICS = {
         {"id": "status_code", "name": "HTTP Status Code", "type": "number"},
         {"id": "packet_loss", "name": "Packet Loss (%)", "type": "number"},
     ],
+    "rds": [
+        {"id": "status", "name": "DB Instance Status", "type": "string"},
+        {"id": "engine", "name": "Database Engine", "type": "string"},
+        {"id": "multi_az", "name": "Multi-AZ Enabled", "type": "string"},
+        {"id": "storage_type", "name": "Storage Type", "type": "string"},
+    ],
+    "lambda_functions": [
+        {"id": "state", "name": "Function State", "type": "string"},
+        {"id": "runtime", "name": "Runtime", "type": "string"},
+        {"id": "memory_mb", "name": "Memory Size (MB)", "type": "number"},
+        {"id": "code_size_bytes", "name": "Code Size (bytes)", "type": "number"},
+    ],
+    "s3": [
+        {"id": "name", "name": "Bucket Name", "type": "string"},
+    ],
+    "sqs": [
+        {"id": "approximate_message_count", "name": "Approximate Message Count", "type": "number"},
+        {"id": "approximate_not_visible", "name": "Approximate Not Visible", "type": "number"},
+    ],
+    "route53": [
+        {"id": "status", "name": "Health Check Status", "type": "string"},
+        {"id": "record_count", "name": "Record Count", "type": "number"},
+    ],
+    "apigateway": [
+        {"id": "endpoint_type", "name": "Endpoint Type", "type": "string"},
+    ],
+    "vpcs": [
+        {"id": "state", "name": "VPC State", "type": "string"},
+        {"id": "subnet_count", "name": "Subnet Count", "type": "number"},
+    ],
+    "load_balancers": [
+        {"id": "state", "name": "Load Balancer State", "type": "string"},
+        {"id": "type", "name": "Load Balancer Type", "type": "string"},
+        {"id": "target_group_count", "name": "Target Group Count", "type": "number"},
+    ],
+    "elastic_ips": [
+        {"id": "is_associated", "name": "Associated", "type": "string"},
+    ],
+    "nat_gateways": [
+        {"id": "state", "name": "NAT Gateway State", "type": "string"},
+    ],
+    "security_groups": [
+        {"id": "inbound_rule_count", "name": "Inbound Rules Count", "type": "number"},
+        {"id": "outbound_rule_count", "name": "Outbound Rules Count", "type": "number"},
+        {"id": "open_to_world", "name": "Open to World (0.0.0.0/0)", "type": "string"},
+    ],
+    "vpn_connections": [
+        {"id": "state", "name": "VPN Connection State", "type": "string"},
+        {"id": "tunnels_up", "name": "Tunnels Up Count", "type": "number"},
+    ],
 }
 
 # ─── Pre-built rule templates ────────────────────────────────────────────────
@@ -164,6 +214,30 @@ RULE_TEMPLATES = [
         "metric": "response_time_ms", "operator": ">", "threshold": 2000,
         "severity": "warning", "cooldown_minutes": 10,
     },
+    {
+        "name": "RDS instance unhealthy",
+        "service": "rds", "resource_filter": "*",
+        "metric": "status", "operator": "!=", "threshold": "available",
+        "severity": "critical", "cooldown_minutes": 5,
+    },
+    {
+        "name": "SQS queue backlog",
+        "service": "sqs", "resource_filter": "*",
+        "metric": "approximate_message_count", "operator": ">", "threshold": 1000,
+        "severity": "warning", "cooldown_minutes": 15,
+    },
+    {
+        "name": "Security group open to world",
+        "service": "security_groups", "resource_filter": "*",
+        "metric": "open_to_world", "operator": "==", "threshold": "true",
+        "severity": "warning", "cooldown_minutes": 15,
+    },
+    {
+        "name": "NAT gateway down",
+        "service": "nat_gateways", "resource_filter": "*",
+        "metric": "state", "operator": "!=", "threshold": "available",
+        "severity": "critical", "cooldown_minutes": 5,
+    },
 ]
 
 
@@ -206,8 +280,10 @@ def update_rule(rule_id: str, updates: dict) -> Optional[dict]:
     rules = get_rules()
     for i, r in enumerate(rules):
         if r["id"] == rule_id:
-            rules[i].update(updates)
-            rules[i]["id"] = rule_id  # prevent ID overwrite
+            allowed = {"name", "enabled", "service", "resource_filter", "metric",
+                       "operator", "threshold", "severity", "channels", "cooldown_minutes", "remediation"}
+            filtered = {k: v for k, v in updates.items() if k in allowed}
+            rules[i].update(filtered)
             save_rules(rules)
             return rules[i]
     return None
@@ -244,17 +320,6 @@ def _extract_metric_value(resource: dict, metric: str, service: str):
         desired = resource.get("desired", 1)
         return running - desired
 
-    if service == "medialive" and metric == "input_loss":
-        # Check pipeline details for input loss
-        pipelines = resource.get("pipeline_details", [])
-        for p in pipelines:
-            if p.get("active_input_switch_action") or "LOSS" in str(p.get("alerts", [])).upper():
-                return "true"
-        return "false"
-
-    if service == "medialive" and metric == "active_alerts":
-        return len(resource.get("alerts_detail", []))
-
     return None
 
 
@@ -278,6 +343,18 @@ def evaluate_rules(infra_data: dict) -> list:
         "ivs": infra_data.get("ivs", {}).get("channels", []),
         "ecs": infra_data.get("ecs_services", []),
         "easy_monitor": infra_data.get("easy_monitor", {}).get("endpoints", []),
+        "rds": infra_data.get("rds", {}).get("items", []),
+        "lambda_functions": infra_data.get("lambda_functions", {}).get("items", []),
+        "s3": infra_data.get("s3", {}).get("items", []),
+        "sqs": infra_data.get("sqs", {}).get("items", []),
+        "route53": infra_data.get("route53", {}).get("items", []),
+        "apigateway": infra_data.get("apigateway", {}).get("items", []),
+        "vpcs": infra_data.get("vpcs", {}).get("items", []),
+        "load_balancers": infra_data.get("load_balancers", {}).get("items", []),
+        "elastic_ips": infra_data.get("elastic_ips", {}).get("items", []),
+        "nat_gateways": infra_data.get("nat_gateways", {}).get("items", []),
+        "security_groups": infra_data.get("security_groups", {}).get("items", []),
+        "vpn_connections": infra_data.get("vpn_connections", {}).get("items", []),
     }
 
     for rule in rules:
@@ -320,6 +397,12 @@ def evaluate_rules(infra_data: dict) -> list:
             value = _extract_metric_value(res, metric, service)
             if value is None:
                 continue
+
+            # Normalize booleans to lowercase strings for consistent comparison
+            if isinstance(value, bool):
+                value = str(value).lower()
+            if isinstance(threshold, bool):
+                threshold = str(threshold).lower()
 
             # Coerce types for comparison
             try:

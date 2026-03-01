@@ -14,12 +14,17 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "history.db")
+DATA_DIR = os.environ.get("DATA_DIR", os.path.dirname(__file__))
+DB_PATH = os.path.join(DATA_DIR, "history.db")
 MAX_ENTRIES = 2000
 
 
 def _get_conn():
+    is_new = not os.path.exists(DB_PATH)
     conn = sqlite3.connect(DB_PATH)
+    if is_new:
+        os.chmod(DB_PATH, 0o600)
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""CREATE TABLE IF NOT EXISTS checks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp TEXT NOT NULL,
@@ -36,6 +41,7 @@ def _avg_cpu(summary):
 
 def save_snapshot(summary: dict):
     """Save a minimal metrics snapshot from a check result."""
+    conn = None
     try:
         conn = _get_conn()
         ts = summary.get("timestamp", datetime.now(timezone.utc).isoformat())
@@ -58,21 +64,26 @@ def save_snapshot(summary: dict):
             "(SELECT id FROM checks ORDER BY id DESC LIMIT ?)",
             (MAX_ENTRIES,))
         conn.commit()
-        conn.close()
     except Exception as e:
         logger.error(f"Failed to save snapshot: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 
 def get_history(limit: int = 500) -> list:
     """Return recent snapshots, oldest first."""
+    conn = None
     try:
         conn = _get_conn()
         rows = conn.execute(
             "SELECT timestamp, summary FROM checks ORDER BY id DESC LIMIT ?",
             (limit,)
         ).fetchall()
-        conn.close()
         return [{"timestamp": r[0], **json.loads(r[1])} for r in reversed(rows)]
     except Exception as e:
         logger.error(f"Failed to read history: {e}")
         return []
+    finally:
+        if conn:
+            conn.close()

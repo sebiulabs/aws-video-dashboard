@@ -46,16 +46,20 @@ def send_slack(message: str, config: Optional[dict] = None) -> bool:
         logger.warning("Slack webhook URL not configured — skipping")
         return False
 
+    if not webhook_url.startswith("https://hooks.slack.com/"):
+        logger.error("Invalid Slack webhook URL — must start with https://hooks.slack.com/")
+        return False
+
     text = _format_slack_text(message)
 
     try:
-        response = requests.post(webhook_url, json={"text": text}, timeout=10)
+        response = requests.post(webhook_url, json={"text": text}, timeout=10, allow_redirects=False)
 
         if response.status_code == 200 and response.text == "ok":
             logger.info("Slack message sent")
             return True
         else:
-            logger.error(f"Slack webhook error: {response.status_code} {response.text}")
+            logger.error(f"Slack webhook error: {response.status_code} {response.text[:200]}")
             return False
 
     except requests.RequestException as e:

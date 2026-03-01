@@ -7,6 +7,7 @@ Evaluates custom alert rules and dispatches to all notification channels.
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field, asdict
 from typing import Optional
@@ -18,15 +19,34 @@ from config_manager import load_config
 from email_notifier import send_email
 from telegram_notifier import send_telegram
 from slack_notifier import send_slack
+from discord_notifier import send_discord
+from teams_notifier import send_teams
 from video_monitor import (
     check_medialive, check_mediaconnect, check_mediapackage,
     check_cloudfront, check_ivs,
 )
+try:
+    from aws_services_monitor import (
+        check_rds, check_lambda, check_s3, check_sqs, check_route53, check_apigateway,
+        check_vpcs, check_load_balancers, check_elastic_ips, check_nat_gateways,
+        check_security_groups, check_vpn_connections,
+    )
+    _AWS_SERVICES_AVAILABLE = True
+except ImportError:
+    _AWS_SERVICES_AVAILABLE = False
 from alert_rules import evaluate_rules
 from easy_monitor import run_endpoint_checks
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_error(e):
+    msg = str(e)
+    msg = re.sub(r"(AKIA|ASIA|AIDA|AROA|AIPA)[A-Z0-9]{12,}", "****", msg)
+    msg = re.sub(r"\b\d{12}\b", "****", msg)
+    msg = re.sub(r"arn:aws:[a-zA-Z0-9_-]+:[a-z0-9-]*:\d{12}:[^\s,\"']+", "arn:aws:****", msg)
+    return msg
 
 
 # ─── Data Models ─────────────────────────────────────────────────────────────
@@ -122,7 +142,7 @@ def get_cpu_utilization(config, instance_id: str, minutes: int = 10, region: str
         if dps:
             return round(sorted(dps, key=lambda x: x["Timestamp"])[-1]["Average"], 2)
     except ClientError as e:
-        logger.warning(f"Could not get CPU for {instance_id}: {e}")
+        logger.warning(f"Could not get CPU for {instance_id}: {_sanitize_error(e)}")
     return None
 
 
@@ -132,13 +152,16 @@ def check_ec2_instances(config, region: str = None) -> list[InstanceStatus]:
     cpu_threshold = config["monitoring"]["cpu_threshold"]
 
     try:
-        response = ec2.describe_instances()
+        paginator = ec2.get_paginator('describe_instances')
+        reservations = []
+        for page in paginator.paginate():
+            reservations.extend(page.get("Reservations", []))
     except ClientError as e:
-        logger.error(f"Failed to describe instances: {e}")
+        logger.error(f"Failed to describe instances: {_sanitize_error(e)}")
         return []
 
     all_ids, raw = [], []
-    for res in response.get("Reservations", []):
+    for res in reservations:
         for inst in res.get("Instances", []):
             all_ids.append(inst["InstanceId"])
             raw.append(inst)
@@ -147,14 +170,15 @@ def check_ec2_instances(config, region: str = None) -> list[InstanceStatus]:
     status_map = {}
     if all_ids:
         try:
-            resp = ec2.describe_instance_status(InstanceIds=all_ids, IncludeAllInstances=True)
-            for s in resp.get("InstanceStatuses", []):
-                iid = s["InstanceId"]
-                sys_s = s.get("SystemStatus", {}).get("Status", "unknown")
-                inst_s = s.get("InstanceStatus", {}).get("Status", "unknown")
-                if sys_s == "ok" and inst_s == "ok": status_map[iid] = "ok"
-                elif "initializing" in (sys_s, inst_s): status_map[iid] = "initializing"
-                else: status_map[iid] = "impaired"
+            status_paginator = ec2.get_paginator('describe_instance_status')
+            for page in status_paginator.paginate(InstanceIds=all_ids, IncludeAllInstances=True):
+                for s in page.get("InstanceStatuses", []):
+                    iid = s["InstanceId"]
+                    sys_s = s.get("SystemStatus", {}).get("Status", "unknown")
+                    inst_s = s.get("InstanceStatus", {}).get("Status", "unknown")
+                    if sys_s == "ok" and inst_s == "ok": status_map[iid] = "ok"
+                    elif "initializing" in (sys_s, inst_s): status_map[iid] = "initializing"
+                    else: status_map[iid] = "impaired"
         except ClientError:
             pass
 
@@ -224,7 +248,7 @@ def check_deployments(config, hours: int = 24, region: str = None) -> list[Deplo
                         region=region or config["aws"]["region"],
                     ))
     except ClientError as e:
-        logger.warning(f"CodeDeploy check failed: {e}")
+        logger.warning(f"CodeDeploy check failed: {_sanitize_error(e)}")
     return deployments
 
 
@@ -234,11 +258,22 @@ def check_ecs_services(config, region: str = None) -> list[dict]:
     ecs = boto3.client("ecs", **_get_boto_kwargs(config, region))
     services = []
     try:
-        clusters = ecs.list_clusters().get("clusterArns", [])
-        for cluster_arn in clusters:
-            svc_arns = ecs.list_services(cluster=cluster_arn).get("serviceArns", [])
+        paginator = ecs.get_paginator('list_clusters')
+        cluster_arns = []
+        for page in paginator.paginate():
+            cluster_arns.extend(page.get("clusterArns", []))
+        for cluster_arn in cluster_arns:
+            svc_paginator = ecs.get_paginator('list_services')
+            svc_arns = []
+            for page in svc_paginator.paginate(cluster=cluster_arn):
+                svc_arns.extend(page.get("serviceArns", []))
             if not svc_arns: continue
-            svcs = ecs.describe_services(cluster=cluster_arn, services=svc_arns).get("services", [])
+            all_services = []
+            for i in range(0, len(svc_arns), 10):
+                batch = svc_arns[i:i+10]
+                resp = ecs.describe_services(cluster=cluster_arn, services=batch)
+                all_services.extend(resp.get("services", []))
+            svcs = all_services
             for svc in svcs:
                 healthy = svc.get("runningCount", 0) >= svc.get("desiredCount", 1)
                 services.append({
@@ -253,7 +288,7 @@ def check_ecs_services(config, region: str = None) -> list[dict]:
                     "region": region or config["aws"]["region"],
                 })
     except ClientError as e:
-        logger.warning(f"ECS check failed: {e}")
+        logger.warning(f"ECS check failed: {_sanitize_error(e)}")
     return services
 
 
@@ -274,7 +309,7 @@ def send_whatsapp(message: str, config: Optional[dict] = None) -> bool:
         logger.info(f"WhatsApp sent: {msg.sid}")
         return True
     except Exception as e:
-        logger.error(f"WhatsApp send failed: {e}")
+        logger.error(f"WhatsApp send failed: {_sanitize_error(e)}")
         return False
 
 
@@ -283,7 +318,10 @@ def send_to_channels(subject: str, body: str, config: dict, channels: Optional[l
     results = {}
     all_channels = config["notifications"]["channels"]
 
-    target = channels or list(all_channels.keys())
+    if channels is None:
+        target = [ch for ch in all_channels if all_channels[ch].get("enabled", False)]
+    else:
+        target = channels
 
     if "whatsapp" in target:
         results["whatsapp"] = send_whatsapp(body, config)
@@ -293,6 +331,10 @@ def send_to_channels(subject: str, body: str, config: dict, channels: Optional[l
         results["telegram"] = send_telegram(body, config)
     if "slack" in target:
         results["slack"] = send_slack(body, config)
+    if "discord" in target:
+        results["discord"] = send_discord(body, config)
+    if "teams" in target:
+        results["teams"] = send_teams(body, config)
 
     return results
 
@@ -428,7 +470,7 @@ def send_daily_summary() -> None:
         send_to_channels("AWS Daily Summary", body, config)
         logger.info("Daily summary sent")
     except Exception as e:
-        logger.error(f"Daily summary failed: {e}")
+        logger.error(f"Daily summary failed: {_sanitize_error(e)}")
 
 
 # ─── Summary + Main Check ───────────────────────────────────────────────────
@@ -509,6 +551,57 @@ def run_check(send_alerts: bool = True) -> dict:
             ivs = check_ivs(config, region=region)
             for ch in ivs.get("channels", []): ch["region"] = region
             _merge_media(media_data, "ivs", ivs, "channels")
+
+        # AWS Services + Networking monitors
+        if _AWS_SERVICES_AVAILABLE:
+            if mon.get("monitor_rds"):
+                rds_data = check_rds(config, region=region)
+                for item in rds_data.get("items", []): item["region"] = region
+                _merge_media(media_data, "rds", rds_data, "items")
+            if mon.get("monitor_lambda"):
+                lam_data = check_lambda(config, region=region)
+                for item in lam_data.get("items", []): item["region"] = region
+                _merge_media(media_data, "lambda_functions", lam_data, "items")
+            if mon.get("monitor_s3"):
+                s3_data = check_s3(config, region=region)
+                for item in s3_data.get("items", []): item["region"] = region
+                _merge_media(media_data, "s3", s3_data, "items")
+            if mon.get("monitor_sqs"):
+                sqs_data = check_sqs(config, region=region)
+                for item in sqs_data.get("items", []): item["region"] = region
+                _merge_media(media_data, "sqs", sqs_data, "items")
+            if mon.get("monitor_route53"):
+                r53_data = check_route53(config, region=region)
+                for item in r53_data.get("items", []): item["region"] = region
+                _merge_media(media_data, "route53", r53_data, "items")
+            if mon.get("monitor_apigateway"):
+                apigw_data = check_apigateway(config, region=region)
+                for item in apigw_data.get("items", []): item["region"] = region
+                _merge_media(media_data, "apigateway", apigw_data, "items")
+            if mon.get("monitor_vpc"):
+                vpc_data = check_vpcs(config, region=region)
+                for item in vpc_data.get("items", []): item["region"] = region
+                _merge_media(media_data, "vpcs", vpc_data, "items")
+            if mon.get("monitor_elb"):
+                elb_data = check_load_balancers(config, region=region)
+                for item in elb_data.get("items", []): item["region"] = region
+                _merge_media(media_data, "load_balancers", elb_data, "items")
+            if mon.get("monitor_eip"):
+                eip_data = check_elastic_ips(config, region=region)
+                for item in eip_data.get("items", []): item["region"] = region
+                _merge_media(media_data, "elastic_ips", eip_data, "items")
+            if mon.get("monitor_nat"):
+                nat_data = check_nat_gateways(config, region=region)
+                for item in nat_data.get("items", []): item["region"] = region
+                _merge_media(media_data, "nat_gateways", nat_data, "items")
+            if mon.get("monitor_security_groups"):
+                sg_data = check_security_groups(config, region=region)
+                for item in sg_data.get("items", []): item["region"] = region
+                _merge_media(media_data, "security_groups", sg_data, "items")
+            if mon.get("monitor_vpn"):
+                vpn_data = check_vpn_connections(config, region=region)
+                for item in vpn_data.get("items", []): item["region"] = region
+                _merge_media(media_data, "vpn_connections", vpn_data, "items")
 
     instances = all_instances
     deployments = all_deployments

@@ -79,7 +79,10 @@ def send_telegram(message: str, config: Optional[dict] = None) -> bool:
             return False
 
     except requests.RequestException as e:
-        logger.error(f"Telegram send failed: {e}")
+        err_msg = str(e)
+        if bot_token and bot_token in err_msg:
+            err_msg = err_msg.replace(bot_token, "***")
+        logger.error(f"Telegram send failed: {err_msg}")
         return False
 
 

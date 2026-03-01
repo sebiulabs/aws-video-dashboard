@@ -12,6 +12,7 @@ All configurable from the Settings UI via monitoring toggles.
 """
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -19,6 +20,14 @@ import boto3
 from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_error(e):
+    msg = str(e)
+    msg = re.sub(r"(AKIA|ASIA|AIDA|AROA|AIPA)[A-Z0-9]{12,}", "****", msg)
+    msg = re.sub(r"\b\d{12}\b", "****", msg)
+    msg = re.sub(r"arn:aws:[a-zA-Z0-9_-]+:[a-z0-9-]*:\d{12}:[^\s,\"']+", "arn:aws:****", msg)
+    return msg
 
 
 def _get_boto_kwargs(config: dict, region: str = None) -> dict:
@@ -123,7 +132,7 @@ def check_medialive(config: dict, region: str = None) -> dict:
                 })
 
     except ClientError as e:
-        logger.warning(f"MediaLive check failed: {e}")
+        logger.warning(f"MediaLive check failed: {_sanitize_error(e)}")
 
     return {
         "total": len(channels),
@@ -187,7 +196,7 @@ def check_mediaconnect(config: dict, region: str = None) -> dict:
                 })
 
     except ClientError as e:
-        logger.warning(f"MediaConnect check failed: {e}")
+        logger.warning(f"MediaConnect check failed: {_sanitize_error(e)}")
 
     return {
         "total": len(flows),
@@ -246,7 +255,7 @@ def check_mediapackage(config: dict, region: str = None) -> dict:
             })
 
     except ClientError as e:
-        logger.warning(f"MediaPackage check failed: {e}")
+        logger.warning(f"MediaPackage check failed: {_sanitize_error(e)}")
 
     return {
         "total": len(channels),
@@ -326,7 +335,7 @@ def check_cloudfront(config: dict, region: str = None) -> dict:
                 })
 
     except ClientError as e:
-        logger.warning(f"CloudFront check failed: {e}")
+        logger.warning(f"CloudFront check failed: {_sanitize_error(e)}")
 
     return {
         "total": len(distributions),
@@ -394,7 +403,7 @@ def check_ivs(config: dict, region: str = None) -> dict:
             })
 
     except ClientError as e:
-        logger.warning(f"IVS check failed: {e}")
+        logger.warning(f"IVS check failed: {_sanitize_error(e)}")
 
     return {
         "total": len(channels),
