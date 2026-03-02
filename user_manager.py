@@ -37,7 +37,10 @@ def _get_conn():
     is_new = not os.path.exists(DB_PATH)
     conn = sqlite3.connect(DB_PATH)
     if is_new:
-        os.chmod(DB_PATH, 0o600)
+        try:
+            os.chmod(DB_PATH, 0o600)
+        except OSError:
+            pass  # Windows
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""CREATE TABLE IF NOT EXISTS users (

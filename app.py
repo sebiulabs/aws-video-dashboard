@@ -142,7 +142,10 @@ def _get_secret_key():
     key = os.urandom(32).hex()
     with open(_SECRET_KEY_PATH, "w") as f:
         f.write(key)
-    os.chmod(_SECRET_KEY_PATH, 0o600)
+    try:
+        os.chmod(_SECRET_KEY_PATH, 0o600)
+    except OSError:
+        pass  # Windows doesn't support Unix permissions
     return key
 
 app.secret_key = _get_secret_key()

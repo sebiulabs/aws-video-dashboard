@@ -157,7 +157,10 @@ def save_config(config: dict) -> bool:
     try:
         with open(CONFIG_PATH, "w") as f:
             json.dump(config, f, indent=2)
-        os.chmod(CONFIG_PATH, 0o600)
+        try:
+            os.chmod(CONFIG_PATH, 0o600)
+        except OSError:
+            pass  # Windows doesn't support Unix permissions
         return True
     except IOError as e:
         logger.error(f"Failed to save config: {e}")
